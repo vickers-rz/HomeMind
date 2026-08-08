@@ -127,6 +127,7 @@ Home Assistant WebSocket / REST API
 - [MVP 操作手册](docs/MVP_RUNBOOK.md)
 - [数据、记忆与习惯学习](docs/DATA_AND_LEARNING.md)
 - [Roadmap](docs/ROADMAP.md)
+- [资源附录：开源项目、插件与研究](docs/RESOURCES.md)
 
 ## MVP 目标
 
