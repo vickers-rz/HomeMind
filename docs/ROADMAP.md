@@ -2,6 +2,20 @@
 
 Roadmap 的原则：先验证“智能是否真的有用”，再增加系统复杂度。
 
+相关研究结论见 [RELATED_WORK.md](RELATED_WORK.md)。研究后，HomeMind 的重点已进一步收敛为：
+
+```text
+被动观察
+→ 多模态 Context
+→ Episode
+→ Pattern / Preference
+→ Recommendation / no_action
+→ Manual Override / Feedback
+→ Bounded Autonomy
+```
+
+而不是重新实现一个自然语言 Home Assistant 控制助手。
+
 ## Phase 0 — Foundation
 
 目标：整理 Home Assistant 现有基础设施。
@@ -21,11 +35,13 @@ Roadmap 的原则：先验证“智能是否真的有用”，再增加系统复
 
 目标：把摄像头从“视频”变成结构化环境传感器。
 
+优先复用 **Frigate + LLM Vision / HA AI Task**，MVP 不自行开发 Vision Adapter。
+
 - [ ] 稳定摄像头 → go2rtc
 - [ ] 部署 Frigate
 - [ ] 配置 garbage station zone
 - [ ] truck/car/person 基础检测
-- [ ] 接入 Vision LLM
+- [ ] 接入 LLM Vision 或 HA AI Task
 - [ ] 输出结构化状态
 
 状态：
@@ -52,23 +68,108 @@ unknown
 - [ ] Weather / wind context
 - [ ] 建立事件时间轴
 - [ ] 手工臭味反馈
+- [ ] 记录人工设备操作来源
 
 完成标准：能够回看一个垃圾站 Episode 的完整多模态时间线。
+
+## Phase 2.5 — Baseline Harness
+
+在完整 HomeMind Core 之前，先回答一个科学问题：
+
+> LLM 到底在哪些决策上真的比简单统计方法更有价值？
+
+建立统一离线评估 Harness，同时运行：
+
+### B0 — Rule baseline
+
+```text
+VOC threshold
++ garbage station state
++ wind direction
+```
+
+### B1 — Conditional frequency baseline
+
+```text
+P(user_action | structured context bucket)
+```
+
+### B2 — AdaHome-style semantic-temporal estimator
+
+```text
+similarity^γ × temporal_decay
+→ weighted preference estimate
+```
+
+### B3 — Episode Retrieval + LLM
+
+```text
+current context
++ similar episodes
+→ recommendation
+```
+
+评估指标：
+
+- [ ] recommendation precision
+- [ ] acceptance rate
+- [ ] false interruption rate
+- [ ] manual override rate
+- [ ] adaptation delay after preference change
+- [ ] latency
+- [ ] token / compute cost
+
+完成标准：能够用相同历史 Episode 离线比较不同 Recommendation Engine。
 
 ## Phase 3 — Recommendation MVP
 
 目标：第一次产生有依据的 AI 建议。
 
+不开发完整通用 LLM Provider Framework；第一版通过 HA AI Task、Home LLM、Local OpenAI compatible endpoint 等现成能力提供 Reasoner adapter。
+
 - [ ] Context schema
 - [ ] Recommendation schema
-- [ ] LLM provider abstraction
-- [ ] Ollama provider
+- [ ] 最小 `Reasoner` protocol
+- [ ] HA AI Task / OpenAI-compatible adapter
 - [ ] `no_action` support
 - [ ] deterministic Policy Guard
 - [ ] HA actionable notification
 - [ ] accept / ignore feedback
+- [ ] recommendation explanation/evidence references
 
 完成标准：AI 不能直接控制设备；用户确认后可靠执行白名单 Script。
+
+## Phase 3.5 — Automation Ownership / Manual Override
+
+借鉴 Adaptive Lighting 的 `take_over_control` 模型，把人工操作本身变成反馈。
+
+建议状态机：
+
+```text
+AI_ELIGIBLE
+AI_RECOMMENDED
+USER_OVERRIDE
+COOLDOWN
+USER_LOCKED
+```
+
+- [ ] 区分 human / HA automation / HomeMind action source
+- [ ] 检测 recommendation 后的人工反向操作
+- [ ] 把 manual override 记录为高权重负反馈
+- [ ] notification cooldown
+- [ ] autoreset override
+- [ ] domain-level override
+- [ ] parameter-level override（类似 `pause_changed`）
+
+例如：
+
+```text
+AC temperature: USER_OVERRIDE
+fresh-air mode: AI_ELIGIBLE
+purifier speed: AI_ELIGIBLE
+```
+
+完成标准：用户手工接管以后，HomeMind 不会继续机械地覆盖或重复提醒。
 
 ## Phase 4 — HomeMind Core
 
@@ -79,9 +180,11 @@ unknown
 - [ ] MQTT connector
 - [ ] SQLite models
 - [ ] normalized event model
+- [ ] actor/source attribution
 - [ ] Context Builder
 - [ ] Recommendation Engine
 - [ ] Feedback Handler
+- [ ] Ownership State Manager
 - [ ] health/diagnostics
 
 完成标准：HomeMind 服务重启/故障不会影响 Home Assistant 基础自动化。
@@ -90,14 +193,46 @@ unknown
 
 目标：建立长期可解释记忆。
 
-- [ ] Episode builder
+HomeMind Memory 分为两条线。
+
+### Behavior Memory
+
+```text
+Context → user action / feedback
+```
+
 - [ ] garbage pollution episode schema
 - [ ] sleep preparation episode schema
+- [ ] manual override episode
 - [ ] daily summarization
 - [ ] retention policy
 - [ ] similar episode retrieval
 
-完成标准：系统能够回答“这次情况和过去哪些情况相似”。
+### Task / Goal Memory
+
+借鉴 IoTGPT 的 Task → Subtask → Context 思路：
+
+```text
+Goal
+→ semantic subactions
+→ current-device implementation
+```
+
+例如：
+
+```text
+protect_indoor_air
+├── reduce_outdoor_air_intake
+├── increase_filtration
+└── maintain_thermal_comfort
+```
+
+- [ ] semantic goal model
+- [ ] device-agnostic subaction model
+- [ ] HA Script mapping
+- [ ] device replacement/remapping
+
+完成标准：既能回答“这种情况下用户通常怎么做”，也能回答“这个 Goal 在当前设备组合里怎样实现”。
 
 ## Phase 6 — Pattern Learning
 
@@ -110,10 +245,52 @@ unknown
 - [ ] acceptance statistics
 - [ ] weak-pattern expiry
 - [ ] minimum support thresholds
+- [ ] AdaHome-style semantic-temporal estimator
+- [ ] pattern-specific decay timescale
+
+不要固定使用单一 7-day decay。不同 Pattern 可以拥有不同时间尺度：
+
+```text
+污染反应 → days/weeks
+睡眠偏好 → weeks/months
+季节温度 → months/seasonal
+临时访客 → hours
+```
 
 完成标准：LLM 使用的行为概率来自可复现统计计算。
 
-## Phase 7 — Activity / Intent Model
+## Phase 7 — Continuous & Device-Agnostic Preference Model
+
+AdaHome 当前主要评估 binary device state；HomeMind 需要处理真实智能家居里的连续参数。
+
+目标属性：
+
+```text
+temperature
+fan_speed
+brightness
+color_temperature
+ventilation_duration
+noise preference
+```
+
+借鉴 IoTGPT，把偏好尽量从设备 ID 提升到环境属性：
+
+```text
+sleep.temperature ≈ 25°C
+sleep.noise = low
+sleep.air_exchange = quiet
+```
+
+- [ ] continuous preference estimator
+- [ ] confidence interval / uncertainty
+- [ ] device-agnostic environmental property
+- [ ] transfer preference to replacement devices
+- [ ] seasonal/context conditioning
+
+完成标准：更换设备后不需要完全重新学习用户偏好。
+
+## Phase 8 — Activity / Intent Model
 
 目标：开始理解人的生活状态，而不仅是设备状态。
 
@@ -131,13 +308,23 @@ Relaxing
 
 - [ ] activity features
 - [ ] hybrid deterministic/probabilistic inference
-- [ ] LLM semantic interpretation
+- [ ] lightweight decision-complexity routing
+- [ ] LLM semantic interpretation only when needed
 - [ ] user correction
 - [ ] confidence tracking
 
-完成标准：HomeMind 可以根据情境而非固定时间判断 Routine。
+引入类似 AdaHome 的 decision complexity routing：
 
-## Phase 8 — Bounded Autonomy
+```text
+D0 Deterministic
+D1 Learned Pattern
+D2 Lightweight LLM
+D3 Rich reasoning / Ask User
+```
+
+完成标准：HomeMind 可以根据情境而非固定时间判断 Routine，并避免无意义 LLM 调用。
+
+## Phase 9 — Bounded Autonomy
 
 默认仍然保持 recommendation-first。
 
@@ -152,6 +339,7 @@ Relaxing
 - [ ] automatic rollback/recheck
 - [ ] audit log
 - [ ] emergency disable switch
+- [ ] manual takeover always wins
 
 例如：
 
@@ -160,7 +348,7 @@ Relaxing
 是否允许以后在相同条件下自动进入污染防护模式？”
 ```
 
-## Phase 9 — Generalize Beyond Air
+## Phase 10 — Generalize Beyond Air
 
 在空气场景证明有效以后扩展：
 
@@ -193,7 +381,7 @@ Relaxing
 - 传感器漂移
 - 滤芯/耗材趋势
 
-## Phase 10 — Packaging
+## Phase 11 — Packaging
 
 如果核心模型稳定，再考虑：
 
@@ -201,7 +389,7 @@ Relaxing
 - [ ] Home Assistant Add-on
 - [ ] Docker image
 - [ ] configuration UI
-- [ ] provider plugin system
+- [ ] LLM API / MCP exposure where useful
 - [ ] documentation site
 - [ ] anonymized demo dataset
 - [ ] automated tests
@@ -217,6 +405,8 @@ Relaxing
 - autonomous multi-agent swarm
 - unrestricted Home Assistant tool access
 - cloud-only architecture
+- custom vision stack when LLM Vision / HA AI Task is sufficient
+- custom universal LLM-provider framework
 - opaque end-to-end model that cannot explain recommendations
 
 ## North-star metrics
@@ -234,7 +424,9 @@ Recommendation usefulness
 User acceptance rate
 False interruption rate
 Manual override rate
+Time-to-adapt
 Explanation accuracy
+Inference cost
 Safety policy violations = 0
 ```
 
