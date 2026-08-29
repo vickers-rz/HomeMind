@@ -189,6 +189,19 @@ purifier speed: AI_ELIGIBLE
 
 完成标准：HomeMind 服务重启/故障不会影响 Home Assistant 基础自动化。
 
+## Phase 4.5 — Spatial Context Foundation
+
+目标：为 HomeMind 建立最小可用的空间语义层，而不是开发新的 BMS。
+
+- [ ] 选一个房间建立 room / zone / surface / opening / luminaire / sensor 最小模型
+- [ ] 导入或手工映射 BIM/IFC 实体到 HA area/device/entity
+- [ ] 使用 Brick 表达设备、点位、位置和 served-by / feeds 关系
+- [ ] 记录空间事实的来源、版本和置信度
+- [ ] 查询“实体在哪里、服务哪里、影响哪些观测点”
+- [ ] 设计 Spatial Context 快照，供 Context Builder 消费
+
+完成标准：能够解释一个空气传感器、窗、灯具和工作区域之间的空间关系；空间层故障不影响 HA。
+
 ## Phase 5 — Episode Memory
 
 目标：建立长期可解释记忆。
@@ -258,6 +271,44 @@ protect_indoor_air
 ```
 
 完成标准：LLM 使用的行为概率来自可复现统计计算。
+
+## Phase 7.5 — Lighting Intelligence
+
+目标：在不影响空气 MVP 的前提下，用照明验证第二个共享 Domain。
+
+- [ ] 接入一个房间的 lux、dimming、色温、日光和存在状态
+- [ ] 记录工作/休息/睡眠等 activity 与灯光手动操作
+- [ ] 基于 Spatial Context 区分环境照明、工作面照明和局部灯具
+- [ ] 建立 daylight / activity / preference Episode
+- [ ] 输出“补光、降亮度、调整色温或保持不变”的可解释建议
+- [ ] 通过 HA Scene / Script 和人工确认执行
+- [ ] 对 DALI / KNX / BACnet 做协议边界验证：由 HA/网关接入，不在 HomeMind 内实现 BMS
+
+完成标准：系统能在一个真实房间内，根据空间、日光、活动和历史偏好提出可撤销的照明建议。
+
+## Phase 8 — Machine Vision & Video Understanding for Space
+
+目标：把视频从单一事件源扩展为空间动态观测。
+
+- [ ] 人员位置、占用区域和活动状态的结构化输出
+- [ ] 关联 camera zone、BIM/Brick zone 与 HA area
+- [ ] 维护 position/activity 的置信度、时效和来源
+- [ ] 将视觉观测与照度、空气和用户反馈组成跨域 Episode
+- [ ] 默认本地处理，明确视频保留和隐私边界
+
+完成标准：视觉只提供带证据的 Context，不绕过人工确认或 Policy Guard 控制设备。
+
+## Phase 9 — Spatial Twin / Intelligent Space Pilot
+
+目标：把多个 Domain 放进一个可解释的空间智能闭环。
+
+- [ ] 合并 IFC、Brick、HA live state 与视觉观测的实体图
+- [ ] 支持空间关系变化和模型版本迁移
+- [ ] 对空气与照明共享 Context，但保持 Domain-specific safety policy
+- [ ] 评估空间关系对推荐精度、误报率和用户负担的增益
+- [ ] 保持“HomeMind 是 intelligence layer，不是 BMS”的架构审计
+
+完成标准：一个房间可同时支持空气和照明建议，且每条建议都能追溯到空间事实、实时状态、历史模式和用户反馈。
 
 ## Phase 7 — Continuous & Device-Agnostic Preference Model
 

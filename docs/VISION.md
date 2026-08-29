@@ -190,9 +190,18 @@ HomeMind 的第一个实验场景选择空气环境，是因为它天然需要�
 
 只有这些因素组合起来，才构成一个真正有意义的 Recommendation。
 
-## 长期愿景
+## 长期愿景：Intelligent Spaces
 
-HomeMind 最终应该形成一个家庭自己的 Environment + Behavior Model。
+HomeMind 最终应该形成一个家庭自己的 **Environment + Behavior + Spatial Model**，并从智能家居走向 **intelligent spaces / spatial intelligence**。
+
+其中 Spatial Model 不是另一个设备平台，而是由 BIM/IFC 的静态空间事实、Brick 的设备/点位语义、Home Assistant 的实时状态，以及机器视觉/视频理解的动态观测共同构成的 Spatial Context / Spatial Twin。它帮助系统理解房间、窗、家具、灯、传感器和人的位置与关系；它不拥有设备控制权，也不替代 BMS。
+
+### 两个平行 Domain
+
+- **Air Intelligence（当前 MVP）**：空气质量、天气、污染事件、新风/空调/净化器与用户反馈。
+- **Lighting Intelligence（第二核心 Domain）**：照度、日光、色温、存在/活动、空间用途、灯具关系和用户连续偏好。
+
+Lighting Intelligence 的目标不是一句话调灯，而是在可解释的空间上下文中回答：某个工作面是否需要补光、自然光变化如何影响场景、用户正在休息还是工作，以及哪些照明建议值得打扰用户。
 
 它不仅可以应用于空气环境，还可以扩展到：
 
@@ -205,5 +214,7 @@ HomeMind 最终应该形成一个家庭自己的 Environment + Behavior Model。
 - 家庭影音；
 - 日常 Routine；
 - 设备异常诊断。
+
+未来还可以连接 DALI、KNX、BACnet 等照明/楼宇协议，但应通过 Home Assistant 或明确的网关边界接入。协议本身属于设备与状态平面，HomeMind 只消费规范化状态并提出建议。
 
 目标不是让房子“自己做更多事情”，而是让系统 **更少打扰、更懂上下文、更知道什么时候应该保持沉默**。

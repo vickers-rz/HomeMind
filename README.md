@@ -1,6 +1,6 @@
 # HomeMind
 
-> A human-in-the-loop, LLM-powered intelligence layer for Home Assistant.
+> A human-in-the-loop, LLM-powered intelligence layer for Home Assistant — evolving toward intelligent spaces and spatial intelligence.
 >
 > 让智能家居从“机械规则自动化”进化为“能够理解情境、学习习惯、提出建议，但把最终决定权留给人”的家庭智能系统。
 
@@ -32,7 +32,29 @@ HomeMind 的出发点不同：**先让人正常生活和手动控制设备，系
 >
 > **[执行] [忽略] [稍后提醒]**
 
-这不是“LLM 控制家电”，而是一个 **Context-aware Recommendation System for the Home**。
+这不是“LLM 控制家电”，而是一个 **Context-aware Recommendation System for the Home**，长期将扩展为面向人的 **Intelligent Space / Spatial Intelligence Layer**。
+
+## 从家庭智能到空间智能
+
+HomeMind 的第一个真实验证场景仍然是空气环境管理；第二个核心 Domain 是 **Lighting Intelligence**。两者共享同一套 Context、Memory、Pattern、Recommendation 和 Feedback 核心：
+
+```text
+                         HomeMind Core
+       Context · Memory · Learning · Reasoning · Policy
+                              │
+              ┌───────────────┴───────────────┐
+              │                               │
+       Air Intelligence                 Lighting Intelligence
+   PM / VOC / CO₂ / weather        lux / daylight / CCT / presence
+   ventilation / purifier          activity / scene / preference
+              └───────────────┬───────────────┘
+                              │
+                   Home Assistant device/state bus
+                              │
+                         Physical space
+```
+
+BIM/IFC、Brick、机器视觉和视频理解为 HomeMind 提供空间语义与观测证据，形成可逐步更新的 **Spatial Context / Spatial Twin**。它们描述“实体在哪里、服务哪个区域、彼此有什么关系”，但不让 HomeMind 变成 BMS：设备接入、实时状态和确定性控制仍由 Home Assistant 及其下游系统负责。
 
 ## 核心原则
 
@@ -45,11 +67,16 @@ HomeMind 的出发点不同：**先让人正常生活和手动控制设备，系
 7. **用户反馈本身就是训练数据**：接受、拒绝、修改和“现在很臭/空气正常”等显式反馈都应进入记忆。
 8. **本地优先、云端可选**：隐私敏感数据应尽可能留在家庭网络中。
 9. **安全护栏高于 AI 决策**：CO₂、安全、设备约束等硬规则永远不能被模型覆盖。
+10. **Spatial context is evidence, not authority**：BIM/IFC、Brick 和视觉推断用于理解空间关系，不能绕过 HA、策略护栏或人工确认。
 
 ## 总体架构
 
 ```text
 Sensors / Cameras / Weather / Presence
+                │
+                ▼
+        BIM / IFC / Brick
+       Spatial Context / Twin
                 │
                 ▼
         Home Assistant
@@ -100,6 +127,8 @@ Sensors / Cameras / Weather / Presence
 | 长期记忆 | SQLite → PostgreSQL | 行为 Episode、Pattern、Recommendation、Feedback |
 | 消息总线 | MQTT | Frigate / HA / HomeMind 事件通信 |
 | 用户交互 | HA Companion App | Actionable Notification 与确认执行 |
+| 空间语义 | BIM / IFC + Brick | 房间、区域、构件、设备、点位及关系的可解释语义 |
+| 照明/楼宇协议 | DALI / KNX / BACnet（经 HA/BMS 网关） | 通过既有系统提供灯光与楼宇状态，不由 HomeMind 直接接管 |
 
 ## 推荐的第一版技术栈
 
@@ -167,3 +196,5 @@ MVP 的成功标准不是“AI 能自动开关设备”，而是：
 **Early design / prototype stage.**
 
 当前重点是先打通感知 → Context → 推荐 → 人工确认 → 反馈闭环，再逐步加入长期习惯学习。
+
+Lighting Intelligence、Spatial Context 和 Spatial Twin 属于后续扩展：先验证空气 MVP，再用一个房间的照明场景验证“空间关系 + 视觉活动 + 光环境 + 用户偏好”的第二条闭环。

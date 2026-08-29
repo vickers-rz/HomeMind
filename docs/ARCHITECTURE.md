@@ -22,6 +22,23 @@ Home Assistant Script
 
 Home Assistant owns device integrations and deterministic execution. HomeMind owns context, memory, pattern learning and recommendations.
 
+HomeMind also does not become a BMS. BIM/IFC and Brick are semantic/spatial inputs; DALI, KNX and BACnet remain downstream building/device protocols, normally reached through Home Assistant or a dedicated gateway. HomeMind may reason over their normalized state, but does not replace commissioning, scheduling, interlocks, alarms or safety logic.
+
+## 1.1 Spatial Context / Spatial Twin
+
+```text
+BIM / IFC (space, openings, luminaires, geometry)
+Brick (equipment, points, locations, relationships)
+Live HA state (availability, level, mode, energy)
+Vision / video understanding (person, activity, position, scene)
+                         ↓
+              Spatial Context / Twin
+                         ↓
+           Context Builder → Recommendation
+```
+
+The twin is a versioned, queryable context model rather than a mandatory 3D viewer. It should answer questions such as “which luminaire contributes to this work area?”, “which sensor is near the window?”, and “which room is occupied?”. Geometry or relationships inferred by vision must carry confidence and provenance; uncertain facts must not trigger control.
+
 ## 2. Layers
 
 ### Layer A — Device & State Plane
@@ -43,6 +60,15 @@ Responsibilities:
 HomeMind should avoid talking directly to individual vendor APIs whenever HA already exposes the device.
 
 ### Layer B — Perception
+
+#### Spatial and building semantics
+
+- BIM/IFC: rooms, zones, openings, surfaces, luminaires and installation relationships;
+- Brick: equipment, points, locations, feeds/served-by relationships and semantic tags;
+- mapping layer: stable IDs linking BIM/Brick entities to HA areas, devices and entities;
+- optional geometry: distances, visibility, daylight exposure and work-plane context.
+
+This layer supplies context only. It does not own live device state or execution.
 
 #### Environmental sensing
 
@@ -269,6 +295,10 @@ Examples:
 ### Layer I — Recommendation / Feedback
 
 Home Assistant Companion App is the initial UI.
+
+### Layer J — Domain adapters
+
+Air Intelligence is the first domain. Lighting Intelligence is the second: it consumes lux/daylight, CCT, dimming, occupancy, activity and spatial relationships, then emits bounded recommendations through the same Policy Guard. DALI/KNX/BACnet integrations should be normalized by HA or a gateway before reaching this layer.
 
 Example:
 
