@@ -1,0 +1,16 @@
+[project]
+name = "homemind-air"
+version = "0.3.0"
+requires-python = ">=3.12"
+dependencies = [
+  "aiohttp==3.12.15",
+  "aiomqtt==2.4.0",
+  "skyfield==1.53",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.4.1", "pytest-asyncio==1.1.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

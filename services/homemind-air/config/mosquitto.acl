@@ -1,0 +1,9 @@
+user homemind
+topic readwrite homemind/air/v1/#
+topic write homeassistant/device/homemind_air/config
+topic read homeassistant/status
+
+user homeassistant
+topic readwrite homemind/air/v1/#
+topic read homeassistant/device/homemind_air/config
+topic read homeassistant/status

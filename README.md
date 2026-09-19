@@ -159,6 +159,9 @@ Home Assistant WebSocket / REST API
 - [智能家居 AI 技术综述：AdaHome / Home LLM / IoTGPT / LLM Vision / MiCU / DevPiolt](docs/TECHNICAL_SURVEY.md)
 - [Roadmap](docs/ROADMAP.md)
 - [资源附录：开源项目、插件与研究](docs/RESOURCES.md)
+- [HomeMind Air 单容器服务](services/homemind-air/README.md)
+- [HomeMind Air 当前部署与回滚记录](services/homemind-air/DEPLOYMENT.md)
+- [Home Assistant / 小米集成兼容性修正](services/homemind-air/COMPATIBILITY.md)
 
 ## MVP 目标
 
@@ -193,8 +196,8 @@ MVP 的成功标准不是“AI 能自动开关设备”，而是：
 
 ## 项目状态
 
-**Early design / prototype stage.**
+**Air MVP deployed in bounded-auto validation stage.**
 
-当前重点是先打通感知 → Context → 推荐 → 人工确认 → 反馈闭环，再逐步加入长期习惯学习。
+当前空气 MVP 已进入受限自动闭环验证：动态启动/停止、手动优先与运行时审计已接入 Home Assistant；当前重点是完成自然自动周期验收、故障/不可用状态防护与版本化回滚，再逐步加入长期习惯学习。
 
 Lighting Intelligence、Spatial Context 和 Spatial Twin 属于后续扩展：先验证空气 MVP，再用一个房间的照明场景验证“空间关系 + 视觉活动 + 光环境 + 用户偏好”的第二条闭环。
