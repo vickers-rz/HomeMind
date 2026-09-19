@@ -36,6 +36,8 @@ class DecisionEngine:
         self.last_fan_state: str | None = None
         self.last_fan_level: str | None = None
         self.last_fan_preset: str | None = None
+        self.last_heater_state: str | None = None
+        self.last_heat_level: str | None = None
 
     def update(self, state: EntityState) -> dict[str, Any] | None:
         key = next((name for name, entity_id in self.entity_ids.items() if entity_id == state.entity_id), None)
@@ -50,6 +52,22 @@ class DecisionEngine:
             actor = self.classify_actor(state)
             return self.handle_setting_transition(
                 "flow", previous_level, state.state, actor
+            )
+        if key == "heater":
+            previous = self.last_heater_state
+            self.last_heater_state = state.state
+            if previous is None or previous == state.state:
+                return None
+            return self.handle_setting_transition(
+                "heater", previous, state.state, self.classify_actor(state)
+            )
+        if key == "heat_level":
+            previous = self.last_heat_level
+            self.last_heat_level = state.state
+            if previous is None or previous == state.state:
+                return None
+            return self.handle_setting_transition(
+                "heat_level", previous, state.state, self.classify_actor(state)
             )
         if key != "fan":
             return None
@@ -98,6 +116,28 @@ class DecisionEngine:
         weather = self.states.get("weather")
         attrs = weather.attributes if weather else {}
         aqi = attrs.get("aqi") if isinstance(attrs.get("aqi"), dict) else {}
+        fresh_air_info = self.states.get("fresh_air_info")
+        fresh_air_attrs = fresh_air_info.attributes if fresh_air_info else {}
+        local_outdoor_temperature = None
+        local_outdoor_temperature_fresh = False
+        if fresh_air_info:
+            reported = fresh_air_info.last_reported or fresh_air_info.last_updated
+            age_seconds = (now - reported.astimezone(timezone.utc)).total_seconds()
+            raw_local_temperature = fresh_air_attrs.get("environment.temperature")
+            try:
+                candidate = float(raw_local_temperature)
+                if math.isfinite(candidate) and -50 <= candidate <= 60 and 0 <= age_seconds <= 180:
+                    local_outdoor_temperature = candidate
+                    local_outdoor_temperature_fresh = True
+            except (TypeError, ValueError):
+                pass
+        weather_outdoor_temperature = attrs.get("temperature")
+        outdoor_temperature = local_outdoor_temperature if local_outdoor_temperature_fresh else weather_outdoor_temperature
+        outdoor_temperature_source = (
+            "fresh_air_intake" if local_outdoor_temperature_fresh
+            else "qweather" if weather_outdoor_temperature is not None
+            else None
+        )
         values = {
             "co2": self.number("co2"),
             "indoor_pm25": self.number("indoor_pm25"),
@@ -105,7 +145,20 @@ class DecisionEngine:
             "indoor_humidity": self.number("indoor_humidity"),
             "fan": self.states.get("fan").state if self.states.get("fan") else None,
             "fan_level": self.number("fan_level"),
-            "outdoor_temperature": attrs.get("temperature"),
+            "heater": (
+                "on" if fresh_air_attrs.get("air_fresh.heater") is True
+                else "off" if fresh_air_attrs.get("air_fresh.heater") is False
+                else self.states.get("heater").state if self.states.get("heater") else None
+            ),
+            "heat_level": (
+                f"Level{int(fresh_air_attrs.get('air_fresh.heat_level'))}"
+                if isinstance(fresh_air_attrs.get("air_fresh.heat_level"), (int, float))
+                else self.states.get("heat_level").state if self.states.get("heat_level") else None
+            ),
+            "outdoor_temperature": outdoor_temperature,
+            "outdoor_temperature_source": outdoor_temperature_source,
+            "outdoor_temperature_local": local_outdoor_temperature,
+            "outdoor_temperature_weather": weather_outdoor_temperature,
             "outdoor_humidity": attrs.get("humidity"),
             "wind_speed": attrs.get("wind_speed"),
             "precipitation": attrs.get("precip", 0),
@@ -141,9 +194,12 @@ class DecisionEngine:
         if dust:
             cap = 100
 
-        indoor_t = float(v.get("indoor_temperature") or 25)
-        outdoor_t = float(v.get("outdoor_temperature") or indoor_t)
-        thermal_factor = clamp(1 - abs(indoor_t - outdoor_t) / 25, 0.35, 1)
+        indoor_t = v.get("indoor_temperature")
+        outdoor_t = v.get("outdoor_temperature")
+        thermal_factor = (
+            clamp(1 - abs(float(indoor_t) - float(outdoor_t)) / 25, 0.35, 1)
+            if indoor_t is not None and outdoor_t is not None else 1.0
+        )
         wind_factor = 0.7 if float(v.get("wind_speed") or 0) > 30 else 1.0
         rain_factor = 0.7 if float(v.get("precipitation") or 0) > 0 else 1.0
         weather_score = air_factor * thermal_factor * wind_factor * rain_factor
@@ -183,6 +239,9 @@ class DecisionEngine:
             reason_code="iaq_demand" if action != "no_action" else "monitor",
             reason="；".join(reason_bits),
             input_quality=context.quality,
+            critical_input_quality="degraded" if context.stale else "good",
+            outdoor_temperature=v.get("outdoor_temperature"),
+            outdoor_temperature_source=v.get("outdoor_temperature_source"),
             action=action,
             authority=authority,
             priority=priority,
@@ -283,7 +342,7 @@ class DecisionEngine:
                 domain=domain,
                 actor=actor,
                 started_at=now,
-                expires_at=now + timedelta(hours=2),
+                expires_at=now + timedelta(minutes=15),
                 reason=f"manual_{domain}_change",
             )
             self.manual.state = f"manual_{domain}"

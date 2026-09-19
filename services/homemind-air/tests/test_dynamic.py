@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.dynamic import DynamicEngine, absolute_humidity
+from app.dynamic import DynamicEngine, absolute_humidity, seasonal_mode
 from app.models import EntityState
 from app.db import Store
 from test_engine import populated, IDS, state
@@ -74,10 +74,10 @@ def test_flow_hold_expires_without_blocking_stop():
     e.update(state('fan.air','on'))
     e.update(state('select.flow',300,context={'user_id':'person'}))
     e.handle_setting_transition('flow',100,300,'human_ha')
-    r = evaluate(e,t,minutes=15,co2=600)
+    r = evaluate(e,t,minutes=14,co2=600)
     assert r.flow_hold_until
+    assert evaluate(e,t,minutes=1).flow_hold_until is None
     assert evaluate(e,t,minutes=2).action == 'air_off'
-    assert evaluate(e,t,minutes=14).flow_hold_until is None
 
 
 def test_initial_reconnect_and_unavailable_are_not_manual():
@@ -111,14 +111,34 @@ def test_optional_weather_failure_keeps_baseline_target():
     c=e.build_context(t[0]); r=e.recommend(c)
     assert c.values['outdoor_pm25'] is None
     assert r.target_co2 == 700 and r.input_quality == 'degraded'
+    assert r.critical_input_quality == 'good'
     assert r.action != 'no_action'
+
+
+def test_weather_stale_does_not_discard_fresh_local_intake_temperature():
+    e, t = setup(950)
+    local = state('button.air_info', 'unknown', {'environment.temperature': 5})
+    local.last_updated = t[0]
+    local.last_reported = t[0]
+    e.update(local, initial=True)
+    e.states['weather'].last_updated -= timedelta(hours=3)
+    c = e.build_context(t[0])
+    r = e.recommend(c)
+    assert c.values['outdoor_temperature'] == 5
+    assert c.values['outdoor_temperature_source'] == 'fresh_air_intake'
+    assert c.values['outdoor_pm25'] is None
+    assert r.outdoor_temperature == 5
+    assert r.outdoor_temperature_source == 'fresh_air_intake'
+    assert '来自新风机进风口' in r.reason
 
 
 @pytest.mark.parametrize('invalid',['nan','inf','unavailable'])
 def test_invalid_critical_data_prevents_actions(invalid):
     e,t=setup()
     e.states['co2'].state=invalid
-    assert evaluate(e,t).action == 'no_action'
+    result = evaluate(e,t)
+    assert result.action == 'no_action'
+    assert result.critical_input_quality == 'degraded'
 
 
 def test_missing_trend_is_not_a_fake_estimate():
@@ -192,6 +212,126 @@ def test_temperature_forecast_correction_is_bounded():
     c.values['forecast']={'hours':{'1':{'temperature':-15}}}
     adjusted=e.lockout_minutes(c)
     assert adjusted<=base*1.2
+
+
+def test_ble_pair_freshness_uses_recent_sibling_report():
+    e, t = setup(950)
+    e.states['indoor_temperature'].last_updated = t[0] - timedelta(minutes=20)
+    e.states['indoor_temperature'].last_reported = t[0] - timedelta(minutes=20)
+    e.states['indoor_humidity'].last_updated = t[0]
+    e.states['indoor_humidity'].last_reported = t[0]
+    c = e.build_context(t[0])
+    assert c.values['indoor_temperature'] == 25
+    assert c.values['indoor_humidity'] == 45
+    assert 'indoor_temperature' not in c.stale
+    assert 'indoor_humidity' not in c.stale
+
+
+def test_ble_pair_stales_after_shared_thirty_minute_ceiling():
+    e, t = setup(950)
+    for key in ('indoor_temperature', 'indoor_humidity'):
+        e.states[key].last_updated = t[0] - timedelta(minutes=31)
+        e.states[key].last_reported = t[0] - timedelta(minutes=31)
+    c = e.build_context(t[0])
+    assert c.values['indoor_temperature'] is None
+    assert c.values['indoor_humidity'] is None
+
+
+def test_outdoor_absolute_humidity_uses_coherent_weather_pair():
+    e, t = setup(950)
+    local = state('button.air_info', 'unknown', {'environment.temperature': 30})
+    local.last_updated = local.last_reported = t[0]
+    e.update(local, initial=True)
+    e.states['weather'].attributes['temperature'] = 10
+    e.states['weather'].attributes['humidity'] = 50
+    c = e.build_context(t[0])
+    assert c.values['outdoor_temperature'] == 30
+    assert c.values['outdoor_absolute_humidity'] == pytest.approx(absolute_humidity(10, 50))
+    assert c.values['outdoor_absolute_humidity'] != pytest.approx(absolute_humidity(30, 50))
+
+
+@pytest.mark.parametrize('longitude,mode', [
+    (90, 'hot_humid'),
+    (176, 'autumn_humid'),
+    (270, 'cold_dry'),
+    (345, 'spring_transition'),
+])
+def test_solar_longitude_selects_low_weight_seasonal_prior(longitude, mode):
+    assert seasonal_mode({'longitude': longitude}) == mode
+
+
+def test_autumn_humid_profile_penalizes_moisture_import():
+    e, t = setup(800, 20)
+    e.solar = {'longitude': 176}
+    e.states['indoor_temperature'].state = '25'
+    e.states['indoor_humidity'].state = '68'
+    e.states['weather'].attributes.update({'temperature': 24, 'humidity': 95})
+    c = e.build_context(t[0])
+    climate = e.climate_exchange(c.values)
+    assert climate['seasonal_mode'] == 'autumn_humid'
+    assert climate['humidity_strategy'] == 'avoid_moisture_import'
+    assert climate['factor'] < 1
+
+
+def test_cold_dry_profile_penalizes_overdrying():
+    e, t = setup(800, 20)
+    e.solar = {'longitude': 270}
+    e.states['indoor_temperature'].state = '21'
+    e.states['indoor_humidity'].state = '35'
+    e.states['weather'].attributes.update({'temperature': 0, 'humidity': 40})
+    c = e.build_context(t[0])
+    climate = e.climate_exchange(c.values)
+    assert climate['seasonal_mode'] == 'cold_dry'
+    assert climate['humidity_strategy'] == 'avoid_overdrying'
+    assert climate['factor'] < 1
+
+
+def test_forecast_can_prefer_better_nonurgent_window():
+    e, t = setup(800, 20)
+    e.states['indoor_temperature'].state = '25'
+    e.states['indoor_humidity'].state = '50'
+    local = state('button.air_info', 'unknown', {'environment.temperature': 8})
+    local.last_updated = local.last_reported = t[0]
+    e.update(local, initial=True)
+    e.forecast = {
+        'updated_at': t[0].isoformat(),
+        'hours': {'1': {'temperature': 22, 'humidity': 50}}
+    }
+    climate = e.climate_exchange(e.build_context(t[0]).values)
+    assert climate['forecast_strategy'] == 'wait_better_window'
+    assert climate['factor'] < 1
+
+
+def test_forecast_never_defers_hard_iaq_start():
+    e, t = setup(950, 20)
+    e.states['indoor_temperature'].state = '25'
+    local = state('button.air_info', 'unknown', {'environment.temperature': 15})
+    local.last_updated = local.last_reported = t[0]
+    e.update(local, initial=True)
+    e.forecast = {
+        'updated_at': t[0].isoformat(),
+        'hours': {'1': {'temperature': 22, 'humidity': 50}}
+    }
+    r = evaluate(e, t, co2=950, pm=20)
+    assert r.forecast_strategy == 'current_window'
+    assert r.action == 'air_normal'
+
+
+def test_pm25_above_35_blocks_maximum_flow_shortcut_even_when_aqi_is_good():
+    e, t = setup(950, 56)
+    e.states['weather'].attributes['aqi'].update({'aqi': 93, 'pm10': 82})
+    r = evaluate(e, t)
+    assert r.flow < 300
+    assert '最大风量300' not in r.reason
+
+
+def test_strong_wind_blocks_maximum_flow_shortcut():
+    e, t = setup(950, 10)
+    e.states['weather'].attributes['aqi'].update({'aqi': 60, 'pm10': 40})
+    e.states['weather'].attributes['wind_speed'] = 45
+    r = evaluate(e, t)
+    assert r.flow < 300
+    assert '最大风量300' not in r.reason
 
 
 def test_clean_outdoor_prefers_maximum_flow():
@@ -268,3 +408,45 @@ def test_explicit_weather_exceptions_retain_relaxation(field,value,reason):
     assert r.start_co2 == (1000 if field == 'pm10' else 950)
     assert reason in r.reason
     assert 'CO₂停止目标800例外' in r.reason
+
+
+def test_manual_power_session_can_receive_engine_flow_correction():
+    e, t = setup(650, 10)
+    # The device was already at 60 before the physical/manual power-on, so there
+    # is no separate manual flow lease. The power lease must not freeze flow
+    # correction for the whole session.
+    e.states['fan_level'].state = '60'
+    e.last_fan_level = '60'
+    e.update(state('fan.air', 'on'))
+    r = evaluate(e, t, minutes=10, co2=650, pm=12)
+    assert r.authority == 'manual_run'
+    assert r.flow == 300
+    assert r.action == 'air_normal'
+
+
+def test_automatic_restart_obeys_engine_anti_short_cycle():
+    e, t = setup(950, 10)
+    assert evaluate(e, t).action == 'air_normal'
+
+    e.known_contexts['auto-on'] = t[0] + timedelta(minutes=5)
+    e.update(state('fan.air', 'on', context={'parent_id': 'auto-on'}))
+    evaluate(e, t, minutes=10, co2=600, pm=12)
+    assert evaluate(e, t, minutes=2).action == 'air_off'
+
+    e.known_contexts['auto-off'] = t[0] + timedelta(minutes=5)
+    e.update(state('fan.air', 'off', context={'parent_id': 'auto-off'}))
+    assert evaluate(e, t, minutes=1, co2=950, pm=12).action == 'no_action'
+    assert evaluate(e, t, minutes=9, co2=950, pm=12).action == 'air_normal'
+
+
+def test_stop_dwell_must_be_continuous():
+    e, t = setup(950, 10)
+    e.known_contexts['auto-on'] = t[0] + timedelta(minutes=5)
+    e.update(state('fan.air', 'on', context={'parent_id': 'auto-on'}))
+
+    assert evaluate(e, t, minutes=10, co2=600, pm=12).action != 'air_off'
+    assert evaluate(e, t, minutes=1, co2=750, pm=12).action != 'air_off'
+    assert e.runtime['target_since'] is None
+    assert evaluate(e, t, minutes=1, co2=600, pm=12).action != 'air_off'
+    assert evaluate(e, t, minutes=1, co2=600, pm=12).action != 'air_off'
+    assert evaluate(e, t, minutes=1, co2=600, pm=12).action == 'air_off'

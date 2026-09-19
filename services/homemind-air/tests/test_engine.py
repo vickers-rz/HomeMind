@@ -11,6 +11,9 @@ IDS = {
     "indoor_humidity": "sensor.humidity",
     "fan": "fan.air",
     "fan_level": "select.flow",
+    "heater": "switch.heater",
+    "heat_level": "select.heat_level",
+    "fresh_air_info": "button.air_info",
     "weather": "weather.home",
     "sun": "sun.sun",
     "enabled": "input_boolean.enabled",
@@ -37,8 +40,11 @@ def populated(co2=950, indoor_pm25=12, outdoor_pm25=20, outdoor_pm10=40):
         state("sensor.humidity", 45),
         state("fan.air", "off"),
         state("select.flow", 300),
+        state("switch.heater", "off"),
+        state("select.heat_level", "Level1"),
         state("weather.home", "cloudy", {
             "temperature": 28,
+            "humidity": 50,
             "wind_speed": 10,
             "precip": 0,
             "condition_cn": "多云",
@@ -47,6 +53,47 @@ def populated(co2=950, indoor_pm25=12, outdoor_pm25=20, outdoor_pm10=40):
     ]:
         engine.update(item)
     return engine
+
+
+
+
+def test_fresh_air_intake_temperature_is_preferred_over_qweather():
+    engine = populated()
+    engine.update(state("button.air_info", "unknown", {"environment.temperature": 6}))
+    context = engine.build_context(datetime.now(timezone.utc))
+    assert context.values["outdoor_temperature"] == 6
+    assert context.values["outdoor_temperature_source"] == "fresh_air_intake"
+    assert context.values["outdoor_temperature_weather"] == 28
+
+
+def test_stale_fresh_air_intake_temperature_falls_back_to_qweather():
+    engine = populated()
+    engine.update(state("button.air_info", "unknown", {"environment.temperature": 6}, minutes_old=4))
+    context = engine.build_context(datetime.now(timezone.utc))
+    assert context.values["outdoor_temperature"] == 28
+    assert context.values["outdoor_temperature_source"] == "qweather"
+
+
+def test_heater_state_is_collected_into_context_without_changing_policy():
+    engine = populated()
+    engine.update(state("button.air_info", "unknown", {
+        "environment.temperature": 8,
+        "air_fresh.heater": True,
+        "air_fresh.heat_level": 2,
+    }))
+    context = engine.build_context(datetime.now(timezone.utc))
+    assert context.values["heater"] == "on"
+    assert context.values["heat_level"] == "Level2"
+
+
+def test_manual_heater_change_creates_fifteen_minute_observation_lease():
+    engine = populated()
+    engine.last_heater_state = "off"
+    transition = engine.update(state("switch.heater", "on"))
+    assert transition["event"] == "heater_change"
+    assert transition["manual_lease"] is True
+    lease = engine.manual.overrides["heater"]
+    assert lease.expires_at - lease.started_at == timedelta(minutes=15)
 
 
 def test_high_co2_recommends_action():
@@ -70,6 +117,7 @@ def test_stale_input_disables_action():
     result = engine.recommend(engine.build_context(datetime.now(timezone.utc)))
     assert result.action == "no_action"
     assert result.input_quality == "degraded"
+    assert result.critical_input_quality == "degraded"
 
 
 def test_unchanged_fan_state_does_not_become_stale():
@@ -120,6 +168,8 @@ def test_manual_flow_change_creates_only_flow_lease():
     )
     assert transition["manual_lease"] is True
     assert set(engine.manual.overrides) == {"flow"}
+    lease = engine.manual.overrides["flow"]
+    assert lease.expires_at - lease.started_at == timedelta(minutes=15)
     authority, priority = engine.active_authority(
         engine.build_context(datetime.now(timezone.utc))
     )

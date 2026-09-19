@@ -2,6 +2,267 @@
 
 ## Current deployment
 
+### 0.5.1 adaptive-learning capture source + shadow learner — 2026-09-19
+
+Repository source has advanced to `homemind-air:0.5.1`, but the realtime live
+container remains `homemind-air:0.5.0` at the time of this record. 0.5.1 is a
+data-capture preparation release and does not add automatic heater control.
+
+0.5.1 adds the fresh-air unit's local heater state and three-level heat setting
+to the realtime context/history:
+
+- `switch.dmaker_t2017_ee71_heater`
+- `select.dmaker_t2017_ee71_heat_level`
+- local device-info attributes `air_fresh.heater` and
+  `air_fresh.heat_level`
+
+Manual heater and heat-level changes are recorded as setting transitions and
+receive a 15-minute manual observation lease. The realtime decision policy does
+not yet issue heater actions.
+
+A separate `homemind-air-learner:0.1.0` sidecar is running on the N100 in
+shadow mode. It has a 1 CPU / 768 MB resource limit, reads the HomeMind SQLite
+history, retrains every 15 minutes over the latest 30 days, and writes only
+versioned JSON model output to `/data/adaptive_model.json`. It has no Home
+Assistant token and no device-control path.
+
+The learner uses episode-based robust system identification with NumPy, SciPy
+and scikit-learn. The first historical replay covered about 35.6k decision
+samples, 3.5k stable windows and 74 configuration transitions. Initial accepted
+shadow estimates included approximately 0.36 h^-1 natural ACH, a 4.6 h derived
+thermal time constant, about 1.49 ACH additional fan effect at 300 m3/h, and
+about 3.27 h^-1 PM2.5 removal at 300 m3/h. The fan thermal-exchange coefficient
+failed validation and was rejected. Heater Level1/Level2/Level3 all have zero
+real training samples and therefore zero learned confidence.
+
+The full target architecture, safety shell, confidence gates and staged
+shadow -> advisory -> bounded adaptive -> lightweight MPC rollout are documented
+in [ADAPTIVE-CONTROL.md](ADAPTIVE-CONTROL.md).
+
+Source regression result before commit/push: 85 tests passed.
+
+### 0.5.0 BLE thermal-moisture + seasonal forecast policy — 2026-09-19
+
+Current image: `homemind-air:0.5.0`. The previous 0.4.2 container is retained as
+`homemind-air-pre050-20260919-215656`, with a consistent SQLite backup at
+`<HOMEMIND_DATA_DIR>/pre050-20260919-215656.sqlite3`.
+
+0.5.0 makes the nearby Xiaomi MJWSD05MMC BLE thermometer/hygrometer a first-class
+thermal/moisture policy input. It was already mapped as `indoor_temperature`
+and `indoor_humidity`, but earlier policy used it only shallowly and could mark
+an unchanged temperature stale while humidity continued to report. The two
+entities are now treated as one paired BLE sample: a recent report from either
+keeps both valid for up to 30 minutes when both numeric values remain valid.
+
+Thermal/moisture source model:
+
+- Indoor temperature + RH: local Xiaomi BLE sensor beside the fresh-air unit.
+- Intake temperature: local fresh-air-unit `environment.temperature`, with
+  QWeather temperature fallback.
+- Outdoor absolute humidity: QWeather temperature + QWeather RH from the same
+  weather source. Intake temperature is intentionally not mixed with QWeather
+  RH because there is no local intake-humidity sensor.
+- Outdoor particulate pollution: QWeather/AQI only; the unit PM2.5 sensor
+  remains indoor PM2.5.
+- Forecast: nearest valid 1/3/6-hour QWeather hourly temperature + humidity.
+- Seasonal prior: `CLIMATE_PROFILE=xian_cold_monsoon`, with solar-longitude
+  modes `hot_humid`, `autumn_humid`, `cold_dry`, and
+  `spring_transition`.
+
+The climate exchange layer is deliberately bounded. It adjusts preferred flow
+and manual-off lockout, but does not suppress hard IAQ start conditions.
+Direction matters: ventilation is favored when it helps cool/warm or correct
+indoor humidity and penalized when it imports moisture during warm/wet seasons
+or worsens dryness during the cold/dry season. A materially better 1/3/6-hour
+forecast window may reduce preferred flow for nonurgent IAQ; forecast deferral is
+disabled once CO₂ or indoor PM2.5 reaches the hard start condition.
+
+The maximum-flow shortcut is also stricter in 0.5.0: AQI <= 100 alone is no
+longer sufficient. 300 m3/h additionally requires outdoor PM2.5 <= 35,
+PM10 < 150, no dust condition, wind <= 30 km/h, no current precipitation, no
+severe temperature delta, and no materially better near-term climate window.
+
+Manual-off lockout keeps the original CO₂/trend/outdoor-pollution base, but its
+thermal/moisture correction is now directional. For example, dry outdoor air can
+shorten lockout when indoor RH is high, while the same air can lengthen lockout
+during a cold/dry season when indoor RH is already low. The combined
+thermal/moisture/forecast correction remains bounded to +/-20% of the lockout
+duration, and the original manual-off timestamp remains the deadline anchor.
+
+MQTT Discovery additionally exposes:
+
+- `sensor.homemind_air_seasonal_mode`
+- `sensor.homemind_air_climate_exchange_factor`
+- `sensor.homemind_air_indoor_absolute_humidity`
+- `sensor.homemind_air_outdoor_absolute_humidity`
+
+Deployment verification:
+
+- 83 regression tests passed.
+- Live BLE input: 25.3 C / 63% RH; both values were accepted as fresh.
+- Live intake temperature: 22-23 C from the fresh-air unit.
+- Live coherent absolute humidity: indoor about 14.75 g/m3 and outdoor about
+  14.82 g/m3, yielding a neutral humidity strategy.
+- Solar longitude selected `autumn_humid` (current solar term: 白露).
+- QWeather AQI 93 with PM2.5 56 no longer qualified for the 300 m3/h shortcut;
+  the live recommendation was 260-280 m3/h as indoor PM2.5 was about 35.
+- The existing manual-off lockout remained authoritative throughout deployment:
+  action stayed `no_action` and the fan remained off.
+- Controller was disabled during the container switch and restored only after
+  source/decision verification.
+- HomeMind returned healthy with HA WebSocket connected and input quality good.
+
+### 0.4.2 local intake temperature priority — 2026-09-19
+
+Current image: `homemind-air:0.4.2`. The previous 0.4.1 container is retained as
+`homemind-air-pre042-20260919-211946`, with a consistent SQLite backup at
+`<HOMEMIND_DATA_DIR>/pre042-20260919-211946.sqlite3`.
+
+Outdoor temperature selection now follows:
+
+1. Fresh-air unit local device-info property `environment.temperature` when
+   the device-info snapshot is no older than 180 seconds.
+2. QWeather `weather.*.temperature` as fallback.
+3. No outdoor temperature when neither source is valid.
+
+The separate `sensor.dmaker_t2017_ee71_temperature` entity is intentionally
+not used for freshness because the local Xiaomi integration does not refresh its
+`last_reported` timestamp while the numeric value remains unchanged. The
+device-info entity refreshes locally about every 30 seconds and carries the same
+`environment.temperature` property, making it the authoritative live source.
+
+MQTT Discovery now exposes:
+
+- `sensor.homemind_air_outdoor_temperature`
+- `sensor.homemind_air_outdoor_temperature_source`
+
+The source value is `fresh_air_intake`, `qweather`, or `none`.
+Outdoor PM2.5/PM10 and dust decisions remain sourced from QWeather/AQI inputs;
+the unit's `environment.pm2_5_density` remains classified as indoor PM2.5 and
+is never substituted for outdoor particulate data.
+
+Deployment verification:
+
+- 70 local regression tests passed.
+- Live device-info reported intake temperature 22.0 C while QWeather reported
+  19.0 C; HomeMind selected 22.0 C with source `fresh_air_intake`.
+- The reason sensor explicitly reported that the outdoor temperature came from
+  the fresh-air intake.
+- HomeMind returned healthy with 11 HA source entities connected.
+- Controller was disabled during the container switch and re-enabled only after
+  the new source was validated; the already-running fan remained on without an
+  unintended power transition.
+
+### 0.4.1 manual-setting lease adjustment — 2026-09-19
+
+Current image: `homemind-air:0.4.1`. The previous 0.4.0 container is retained as
+`homemind-air-pre041-20260919-210630`, with a consistent SQLite backup at
+`<HOMEMIND_DATA_DIR>/pre041-20260919-210630.sqlite3`.
+
+Manual flow and preset/mode changes now create a 15-minute override lease
+(previously 30 minutes in DynamicEngine; the older base-class fallback was also
+normalized from two hours to 15 minutes). During the lease, the engine continues
+to calculate and publish a recommendation but will not automatically correct
+flow or mode. The lease boundary is covered by regression tests: it is active at
+14 minutes and expired at 15 minutes.
+
+The manual-off dynamic lockout algorithm was unchanged in 0.4.1. Its historical
+0.4.x policy is documented below; 0.5.0 supersedes the humidity/forecast
+correction with the direction-aware climate-exchange model above.
+
+### Historical 0.4.x manual-off lockout algorithm
+
+A manual off event creates a power override anchored to the original manual-off
+timestamp. The initial duration is selected from current indoor CO₂:
+
+- CO₂ unavailable: 120 minutes.
+- CO₂ < 600 ppm: 240 minutes.
+- 600 <= CO₂ < 750 ppm: 180 minutes.
+- 750 <= CO₂ < 900 ppm: 90 minutes.
+- CO₂ >= 900 ppm: 30 minutes.
+
+Then the engine applies context corrections:
+
+- CO₂ trend uses the last 10 minutes of samples and requires at least six samples
+  spanning at least five minutes. Rising at >= 2 ppm/min subtracts 30 minutes;
+  falling at <= -2 ppm/min adds 30 minutes.
+- Outdoor PM2.5 > 35, PM10 >= 150, or a weather condition containing 沙/尘 adds
+  60 minutes.
+- Indoor/outdoor temperature delta >= 15 C contributes +60 minutes.
+- Absolute-humidity delta > 5 contributes +15 minutes; delta < 2 contributes
+  -15 minutes.
+- If any available forecast hour differs from current indoor temperature by
+  >= 15 C, it contributes +15 minutes.
+- The combined temperature/humidity/forecast correction is capped to +/-20% of
+  the duration after the CO₂-trend and outdoor-pollution adjustments.
+- If the user manually turns the fan off within 30 minutes after an automatic
+  resume, the result is forced to at least 240 minutes.
+- The final lockout is clamped to 30..480 minutes.
+
+While locked and critical inputs remain valid, the duration is recalculated at
+most once every five minutes from current context, but the deadline is always
+`original_manual_off_time + recalculated_duration`; recalculation therefore
+does not create a sliding window. A continuous critical-input-valid CO₂ level of
+>=1500 ppm for 10 minutes activates emergency control, releases the manual power
+lock, and allows ventilation to resume.
+
+### 0.4.0 single-policy executor — 2026-09-19
+
+Current image: `homemind-air:0.4.0`. HomeMind Air is running in
+`bounded_auto` with `DynamicEngine` as the only IAQ/session state machine.
+Home Assistant no longer duplicates CO₂/PM2.5 start/stop thresholds, the
+continuous stop dwell, or the anti-short-cycle rule. It executes retained MQTT
+recommendations through `sensor.homemind_air_action`:
+
+- `air_normal`: apply the engine-recommended preset/flow and turn on only when
+  the fan is currently off; when already running it can perform an authorized
+  flow correction.
+- `air_off`: turn the fan off.
+- `no_action`: leave the device unchanged.
+
+The engine publishes both `input_quality` (whole context) and
+`critical_input_quality` (CO₂, PM2.5 and required fan state). Optional
+humidity/weather staleness can therefore degrade context quality without
+freezing baseline IAQ execution.
+
+Deployment verification:
+
+- Local policy/executor regression suite: 67 tests passed after final deployment regression coverage.
+- Home Assistant `check_config` passed before each restart.
+- MQTT Discovery created `sensor.homemind_air_action` and
+  `sensor.homemind_air_critical_input_quality`.
+- Live manual session verification: the fan was already running at 60 m³/h;
+  the engine published `air_normal`, the HA executor triggered, and the device
+  changed to 100 m³/h. The engine then returned to `no_action`; a later
+  recommendation of 80 m³/h remained unchanged because the configured flow
+  correction deadband is 40 m³/h.
+- After an additional HA restart, HomeMind returned healthy with HA WebSocket
+  connected, critical input quality `good`, and the bounded-auto helpers and
+  executor automations enabled.
+- Flow-change audit now attributes each transition from the HA state context
+  (`user_id` / `parent_id`) instead of inferring the actor from the current
+  control-session helper.
+
+A first 0.4.0 container build failed before service startup because a plain
+native `docker build` did not populate BuildKit's `TARGETARCH`, while the
+Dockerfile incorrectly defaulted to arm64. The live 0.3.0 container was
+immediately restored. The Dockerfile now falls back to `apk --print-arch` and
+accepts both Docker and Alpine architecture names; the rebuilt amd64 image
+started normally.
+
+Rollback assets retained from the deployment window:
+
+- Previous container: `homemind-air-pre040-20260919-202030`.
+- Previous image snapshot: `homemind-air:pre-040-20260919-202030`.
+- Consistent SQLite backup:
+  `<HOMEMIND_DATA_DIR>/pre040-20260919-202030.sqlite3`.
+- HA package and automation backup:
+  `<HA_CONFIG_DIR>/backups/homemind-air-040-20260919-202030/`.
+
+The failed first-build container is retained temporarily as
+`homemind-air-failed040-20260919-202030` for deployment audit and can be
+removed after the validation window.
+
 ### 0.3.0 observation delivery — 2026-09-07
 
 Current image: `homemind-air:0.3.0`. The remaining sections below describe the

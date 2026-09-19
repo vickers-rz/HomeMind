@@ -94,16 +94,19 @@ script:
 automation:
   - id: homemind_air_dynamic_start
     alias: HomeMind Air：动态启动
-    description: 使用HomeMind计算的启动阈值；数据无效时不动作。
+    description: 执行DynamicEngine发布的air_normal动作；HA不再重复实现启停策略。
     initial_state: true
     mode: restart
     triggers:
       - trigger: state
-        entity_id:
-          - sensor.dmaker_t2017_ee71_co2_density
-          - sensor.dmaker_t2017_ee71_pm25_density
-          - sensor.homemind_air_start_co2
-          - sensor.homemind_air_start_pm25
+        entity_id: sensor.homemind_air_action
+        to: air_normal
+      - trigger: state
+        entity_id: input_boolean.homemind_air_controller_enabled
+        to: "on"
+      - trigger: state
+        entity_id: input_select.homemind_air_control_level
+        to: bounded_auto
     conditions:
       - condition: state
         entity_id: input_boolean.homemind_air_controller_enabled
@@ -112,63 +115,64 @@ automation:
         entity_id: input_select.homemind_air_control_level
         state: bounded_auto
       - condition: state
-        entity_id: fan.dmaker_t2017_ee71_air_fresh
-        state: "off"
-      - condition: state
-        entity_id: sensor.homemind_air_input_quality
-        state: "good"
-      - condition: template
-        value_template: >-
-          {{ states('sensor.homemind_air_authority') in ['baseline_iaq', 'emergency_co2'] }}
-      - condition: template
-        value_template: >-
-          {{ is_number(states('sensor.homemind_air_start_co2')) and
-             is_number(states('sensor.homemind_air_start_pm25')) and
-             ((states('sensor.dmaker_t2017_ee71_co2_density') | float(0)) >=
-               (states('sensor.homemind_air_start_co2') | float(99999)) or
-             (states('sensor.dmaker_t2017_ee71_pm25_density') | float(0)) >
-               (states('sensor.homemind_air_start_pm25') | float(99999))) }}
+        entity_id: sensor.homemind_air_action
+        state: air_normal
     actions:
-      - action: input_select.select_option
-        target:
-          entity_id: input_select.airfresh_control_source
-        data:
-          option: automatic
-      - action: input_text.set_value
-        target:
-          entity_id: input_text.airfresh_last_start_reason
-        data:
-          value: HomeMind Air 动态自动启动
-      - action: input_text.set_value
-        target:
-          entity_id: input_text.airfresh_last_start_at
-        data:
-          value: "{{ now().isoformat() }}"
+      - delay: "00:00:01"
+      - condition: state
+        entity_id: sensor.homemind_air_action
+        state: air_normal
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: fan.dmaker_t2017_ee71_air_fresh
+                state: "off"
+            sequence:
+              - action: input_select.select_option
+                target:
+                  entity_id: input_select.airfresh_control_source
+                data:
+                  option: automatic
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.airfresh_last_start_reason
+                data:
+                  value: HomeMind Air DynamicEngine 自动启动
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.airfresh_last_start_at
+                data:
+                  value: "{{ now().isoformat() }}"
       - action: fan.set_preset_mode
         target: {entity_id: fan.dmaker_t2017_ee71_air_fresh}
         data: {preset_mode: Favorite}
       - action: select.select_option
         target: {entity_id: select.dmaker_t2017_ee71_fan_level}
         data: {option: "{{ states('sensor.homemind_air_recommended_flow') }}"}
-      - action: fan.turn_on
-        target: {entity_id: fan.dmaker_t2017_ee71_air_fresh}
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: fan.dmaker_t2017_ee71_air_fresh
+                state: "off"
+            sequence:
+              - action: fan.turn_on
+                target: {entity_id: fan.dmaker_t2017_ee71_air_fresh}
 
   - id: homemind_air_dynamic_stop
     alias: HomeMind Air：动态停止
-    description: 同时低于HomeMind动态CO₂和PM2.5目标后停止。
+    description: 执行DynamicEngine发布的air_off动作；连续dwell、最短运行和防短循环均由Engine唯一决定。
     initial_state: true
-    # HomeMind republishes target sensor attributes on each evaluation. A state
-    # trigger sees those attribute updates, so restart mode can reset the dwell
-    # delay indefinitely. Single mode lets the first valid dwell finish; all
-    # safety and target conditions are checked again immediately before stop.
     mode: single
     triggers:
       - trigger: state
-        entity_id:
-          - sensor.dmaker_t2017_ee71_co2_density
-          - sensor.dmaker_t2017_ee71_pm25_density
-          - sensor.homemind_air_target_co2
-          - sensor.homemind_air_target_pm25
+        entity_id: sensor.homemind_air_action
+        to: air_off
+      - trigger: state
+        entity_id: input_boolean.homemind_air_controller_enabled
+        to: "on"
+      - trigger: state
+        entity_id: input_select.homemind_air_control_level
+        to: bounded_auto
     conditions:
       - condition: state
         entity_id: input_boolean.homemind_air_controller_enabled
@@ -177,45 +181,12 @@ automation:
         entity_id: input_select.homemind_air_control_level
         state: bounded_auto
       - condition: state
+        entity_id: sensor.homemind_air_action
+        state: air_off
+      - condition: state
         entity_id: fan.dmaker_t2017_ee71_air_fresh
         state: "on"
-      - condition: state
-        entity_id: sensor.homemind_air_input_quality
-        state: "good"
-      - condition: template
-        value_template: >-
-          {{ as_timestamp(states('sensor.homemind_air_minimum_run_until'), 0) == 0 or
-             as_timestamp(now()) >= as_timestamp(states('sensor.homemind_air_minimum_run_until'), 0) }}
-      - condition: template
-        value_template: >-
-          {{ is_number(states('sensor.homemind_air_target_co2')) and
-             is_number(states('sensor.homemind_air_target_pm25')) and
-             (states('sensor.dmaker_t2017_ee71_co2_density') | float(99999)) <
-               (states('sensor.homemind_air_target_co2') | float(0)) and
-             (states('sensor.dmaker_t2017_ee71_pm25_density') | float(99999)) <
-               (states('sensor.homemind_air_target_pm25') | float(0)) }}
     actions:
-      - delay: "00:02:00"
-      - condition: state
-        entity_id: input_boolean.homemind_air_controller_enabled
-        state: "on"
-      - condition: state
-        entity_id: input_select.homemind_air_control_level
-        state: bounded_auto
-      - condition: state
-        entity_id: fan.dmaker_t2017_ee71_air_fresh
-        state: "on"
-      - condition: state
-        entity_id: sensor.homemind_air_input_quality
-        state: "good"
-      - condition: template
-        value_template: >-
-          {{ as_timestamp(states('sensor.homemind_air_minimum_run_until'), 0) == 0 or
-             as_timestamp(now()) >= as_timestamp(states('sensor.homemind_air_minimum_run_until'), 0) }}
-      - condition: template
-        value_template: >-
-          {{ (states('sensor.dmaker_t2017_ee71_co2_density') | float(99999)) < (states('sensor.homemind_air_target_co2') | float(0)) and
-             (states('sensor.dmaker_t2017_ee71_pm25_density') | float(99999)) < (states('sensor.homemind_air_target_pm25') | float(0)) }}
       - action: fan.turn_off
         target: {entity_id: fan.dmaker_t2017_ee71_air_fresh}
 

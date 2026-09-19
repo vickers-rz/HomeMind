@@ -23,7 +23,7 @@ LOG = logging.getLogger("homemind_air")
 async def run() -> None:
     settings = Settings()
     store = Store(settings.database_path)
-    engine = DynamicEngine(settings.entity_ids)
+    engine = DynamicEngine(settings.entity_ids, climate_profile=settings.climate_profile)
     engine.manual = ManualState.from_dict(store.get("manual_state"))
     engine.restore(store.get("runtime"))
     # One-time correction for the automatic stop/start sequence that was
@@ -128,7 +128,7 @@ async def run() -> None:
                 recommendation_payload['control_output'] = (
                     'HA动态自动控制' if automatic_control_active else '自动控制已禁用'
                 )
-                recommendation_payload['execution_path'] = 'ha_dynamic_automations'
+                recommendation_payload['execution_path'] = 'ha_engine_action_executor'
                 recommendation_payload['forecast_available'] = context.values.get('forecast', {}).get('available', False)
                 recommendation_payload['lockout_remaining_minutes'] = max(0, int((datetime.fromisoformat(recommendation.lockout_until)-now).total_seconds()/60)) if recommendation.lockout_until else 0
                 if previous_mode != recommendation.execution_mode:
@@ -157,7 +157,7 @@ async def run() -> None:
                     "input_quality": context.quality,
                     "stale": context.stale,
                     "last_evaluation": now.isoformat(),
-                    "control_output": "ha_dynamic_automations" if automatic_control_active else "disabled_by_user",
+                    "control_output": "ha_engine_action_executor" if automatic_control_active else "disabled_by_user",
                 }, retain=True)
                 health_tmp = Path("/data/health.json.tmp")
                 health_tmp.write_text(json.dumps({
@@ -224,7 +224,12 @@ async def run() -> None:
                             transition = engine.update(state, initial=kind == 'initial')
                             if transition:
                                 now = datetime.now(timezone.utc).isoformat()
-                                store.event(now, "fan_transition", transition)
+                                event_kind = (
+                                    "setting_transition"
+                                    if str(transition.get("event", "")).endswith("_change")
+                                    else "fan_transition"
+                                )
+                                store.event(now, event_kind, transition)
                                 store.session(engine.runtime, engine.manual.json_dict(), now)
                                 await bus.publish("manual_state", engine.manual.json_dict(), retain=True)
                         if stop.is_set():

@@ -36,6 +36,17 @@ class Recommendation:
     reason_code: str
     reason: str
     input_quality: str
+    critical_input_quality: str = "good"
+    outdoor_temperature: float | None = None
+    outdoor_temperature_source: str | None = None
+    climate_profile: str | None = None
+    seasonal_mode: str | None = None
+    climate_exchange_factor: float | None = None
+    humidity_strategy: str | None = None
+    temperature_strategy: str | None = None
+    forecast_strategy: str | None = None
+    indoor_absolute_humidity: float | None = None
+    outdoor_absolute_humidity: float | None = None
     action: str = "no_action"
     authority: str = "baseline_iaq"
     priority: int = 6
@@ -51,7 +62,7 @@ class Recommendation:
     decision_id: str = ""
     session_id: str | None = None
     execution_mode: str = "observe"
-    algorithm_version: str = "0.3.0"
+    algorithm_version: str = "0.5.1"
 
     def json_dict(self) -> dict[str, Any]:
         return asdict(self)

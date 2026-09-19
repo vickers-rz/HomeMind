@@ -1,6 +1,6 @@
 [project]
 name = "homemind-air"
-version = "0.3.0"
+version = "0.5.1"
 requires-python = ">=3.12"
 dependencies = [
   "aiohttp==3.12.15",

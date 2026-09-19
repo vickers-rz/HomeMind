@@ -51,6 +51,14 @@ class MQTTBus:
             "availability": {"platform": "binary_sensor", "device_class": "connectivity", "value_template": "{{ 'ON' if value_json.online else 'OFF' }}"},
             "status": {"platform": "sensor", "value_template": "{{ value_json.state }}"},
             "input_quality": {"platform": "sensor", "value_template": "{{ value_json.input_quality }}"},
+            "critical_input_quality": {"platform": "sensor", "value_template": "{{ value_json.critical_input_quality }}"},
+            "action": {"platform": "sensor", "value_template": "{{ value_json.action }}"},
+            "outdoor_temperature": {"platform": "sensor", "device_class": "temperature", "unit_of_measurement": "°C", "value_template": "{{ value_json.outdoor_temperature if value_json.outdoor_temperature is not none else 'None' }}"},
+            "outdoor_temperature_source": {"platform": "sensor", "value_template": "{{ value_json.outdoor_temperature_source if value_json.outdoor_temperature_source is not none else 'none' }}"},
+            "seasonal_mode": {"platform": "sensor", "value_template": "{{ value_json.seasonal_mode if value_json.seasonal_mode is not none else 'unknown' }}"},
+            "climate_exchange_factor": {"platform": "sensor", "value_template": "{{ value_json.climate_exchange_factor if value_json.climate_exchange_factor is not none else 'None' }}"},
+            "indoor_absolute_humidity": {"platform": "sensor", "unit_of_measurement": "g/m³", "value_template": "{{ value_json.indoor_absolute_humidity if value_json.indoor_absolute_humidity is not none else 'None' }}"},
+            "outdoor_absolute_humidity": {"platform": "sensor", "unit_of_measurement": "g/m³", "value_template": "{{ value_json.outdoor_absolute_humidity if value_json.outdoor_absolute_humidity is not none else 'None' }}"},
             "recommended_flow": {"platform": "sensor", "unit_of_measurement": "m³/h", "value_template": "{{ value_json.flow }}"},
             "recommended_minutes": {"platform": "sensor", "unit_of_measurement": "min", "value_template": "{{ value_json.duration_minutes }}"},
             "weather_score": {"platform": "sensor", "value_template": "{{ value_json.weather_score }}"},
@@ -69,9 +77,9 @@ class MQTTBus:
                 "name": "HomeMind Air",
                 "manufacturer": "HomeMind",
                 "model": "Air Decision Hub",
-                "sw_version": "0.3.0",
+                "sw_version": "0.5.1",
             },
-            "origin": {"name": "HomeMind Air", "sw": "0.3.0", "url": "https://github.com/vickers-rz/HomeMind"},
+            "origin": {"name": "HomeMind Air", "sw": "0.5.1", "url": "https://github.com/vickers-rz/HomeMind"},
             "availability_topic": f"{BASE}/availability",
             "components": {},
         }
@@ -87,7 +95,7 @@ class MQTTBus:
         components['reason']['value_template'] = '{{ value_json.reason[:240] }}'
         for object_id, component in components.items():
             state_topic = "status"
-            if object_id in extra or object_id in {"recommended_flow", "recommended_minutes", "weather_score", "demand", "input_quality", "authority", "priority"}:
+            if object_id in extra or object_id in {"recommended_flow", "recommended_minutes", "weather_score", "demand", "input_quality", "critical_input_quality", "action", "outdoor_temperature", "outdoor_temperature_source", "seasonal_mode", "climate_exchange_factor", "indoor_absolute_humidity", "outdoor_absolute_humidity", "authority", "priority"}:
                 state_topic = "recommendation"
             elif object_id in {"manual_state", "manual_overrides"}:
                 state_topic = "manual_state"

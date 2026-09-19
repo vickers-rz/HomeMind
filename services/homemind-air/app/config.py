@@ -21,6 +21,7 @@ class Settings:
     ephemeris_path: str = os.getenv("EPHEMERIS_PATH", "/data/ephemeris/de440s.bsp")
     timezone: str = os.getenv("TZ", "Asia/Shanghai")
     evaluation_seconds: int = int(os.getenv("EVALUATION_SECONDS", "30"))
+    climate_profile: str = os.getenv("CLIMATE_PROFILE", "xian_cold_monsoon")
     entity_ids: dict[str, str] = field(default_factory=lambda: {
         "co2": "sensor.dmaker_t2017_ee71_co2_density",
         "indoor_pm25": "sensor.dmaker_t2017_ee71_pm25_density",
@@ -28,6 +29,9 @@ class Settings:
         "indoor_humidity": "sensor.temperature_humidity_sensor_d4f2_humidity",
         "fan": "fan.dmaker_t2017_ee71_air_fresh",
         "fan_level": "select.dmaker_t2017_ee71_fan_level",
+        "heater": "switch.dmaker_t2017_ee71_heater",
+        "heat_level": "select.dmaker_t2017_ee71_heat_level",
+        "fresh_air_info": "button.dmaker_t2017_ee71_info",
         "weather": "weather.xi_an_he_feng_tian_qi",
         "sun": "sun.sun",
         "enabled": "input_boolean.homemind_air_controller_enabled",

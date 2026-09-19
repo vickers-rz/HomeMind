@@ -6,7 +6,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from .engine import DecisionEngine, clamp
+from .engine import DecisionEngine, clamp, nearest_flow
 from .models import Context, OverrideLease
 
 
@@ -28,10 +28,26 @@ def stamp(value):
     return datetime.fromisoformat(value) if value else None
 
 
+def seasonal_mode(solar):
+    """Low-weight seasonal prior for Xi'an's cold-region monsoon climate."""
+    lon = number((solar or {}).get("longitude"))
+    if lon is None:
+        return "unknown"
+    lon %= 360
+    if 75 <= lon < 165:
+        return "hot_humid"
+    if 165 <= lon < 225:
+        return "autumn_humid"
+    if 225 <= lon < 315:
+        return "cold_dry"
+    return "spring_transition"
+
+
 class DynamicEngine(DecisionEngine):
-    def __init__(self, entity_ids, clock=None):
+    def __init__(self, entity_ids, clock=None, climate_profile="xian_cold_monsoon"):
         super().__init__(entity_ids)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.climate_profile = climate_profile
         self.runtime = {"session_id": None, "started_at": None, "initial_co2": None,
                         "manual_session": False, "target_since": None, "high_since": None,
                         "emergency": False, "last_switch_at": None, "last_adjust_at": None,
@@ -69,6 +85,10 @@ class DynamicEngine(DecisionEngine):
                 self.last_fan_preset = state.attributes.get("preset_mode")
             if key == "fan_level":
                 self.last_fan_level = state.state
+            if key == "heater":
+                self.last_heater_state = state.state
+            if key == "heat_level":
+                self.last_heat_level = state.state
             return None
         return super().update(state)
 
@@ -87,6 +107,29 @@ class DynamicEngine(DecisionEngine):
             if state and state.last_reported and timedelta(0) <= now-state.last_reported <= timedelta(seconds=seconds):
                 if key in context.stale:
                     context.stale.remove(key)
+        # Temperature and humidity come from the same local Xiaomi BLE packet.
+        # Home Assistant may only advance one entity timestamp when just one
+        # measured value changes. Treat either recent report as proof that the
+        # shared nearby-device sample is alive, while keeping a conservative
+        # 30-minute ceiling because these are optional comfort inputs.
+        temp_state = self.states.get("indoor_temperature")
+        humidity_state = self.states.get("indoor_humidity")
+        climate_reports = [
+            state.last_reported or state.last_updated
+            for state in (temp_state, humidity_state)
+            if state is not None and (state.last_reported or state.last_updated)
+        ]
+        if climate_reports:
+            latest_climate_report = max(climate_reports)
+            climate_age = now - latest_climate_report
+            if (
+                timedelta(0) <= climate_age <= timedelta(minutes=30)
+                and self.number("indoor_temperature") is not None
+                and self.number("indoor_humidity") is not None
+            ):
+                for key in ("indoor_temperature", "indoor_humidity"):
+                    if key in context.stale:
+                        context.stale.remove(key)
         for key in ("co2", "indoor_pm25", "indoor_temperature", "indoor_humidity"):
             if self.number(key) is None and key not in context.stale:
                 context.stale.append(key)
@@ -94,9 +137,16 @@ class DynamicEngine(DecisionEngine):
             if key in context.values:
                 context.values[key] = None
         if "weather" in context.stale:
-            for key in list(context.values):
-                if key.startswith("outdoor_") or key in {"wind_speed", "precipitation", "cloud", "weather_condition"}:
+            for key in (
+                "outdoor_humidity", "outdoor_aqi", "outdoor_pm25", "outdoor_pm10",
+                "outdoor_temperature_weather", "wind_speed", "precipitation",
+                "cloud", "weather_condition",
+            ):
+                if key in context.values:
                     context.values[key] = None
+            if context.values.get("outdoor_temperature_source") == "qweather":
+                context.values["outdoor_temperature"] = None
+                context.values["outdoor_temperature_source"] = None
         for key in ("outdoor_temperature", "outdoor_humidity", "outdoor_pm25", "outdoor_pm10", "wind_speed", "precipitation"):
             context.values[key] = number(context.values.get(key))
         for key in ("outdoor_pm25", "outdoor_pm10"):
@@ -104,13 +154,151 @@ class DynamicEngine(DecisionEngine):
                 context.stale.append(key)
         v = context.values
         v["indoor_absolute_humidity"] = absolute_humidity(v.get("indoor_temperature"), v.get("indoor_humidity"))
-        v["outdoor_absolute_humidity"] = absolute_humidity(v.get("outdoor_temperature"), v.get("outdoor_humidity"))
-        v["ble_location"] = "新风机前；不等同全屋平均温湿度"
+        # Humidity must be paired with the weather-service temperature measured
+        # at the same outdoor source. The fresh-air intake has no local RH sensor,
+        # so mixing intake temperature with remote RH would create a false AH.
+        v["outdoor_absolute_humidity"] = absolute_humidity(v.get("outdoor_temperature_weather"), v.get("outdoor_humidity"))
+        v["ble_location"] = "新风机旁；代表设备附近室内热湿环境，不等同全屋平均"
         forecast_at = stamp(self.forecast.get("updated_at"))
         v["forecast"] = self.forecast if forecast_at and now - forecast_at < timedelta(minutes=90) else {"available": False}
         v["solar"] = self.solar
+        v["seasonal_mode"] = seasonal_mode(self.solar)
+        v["climate_profile"] = self.climate_profile
         context.quality = "degraded" if context.stale else "good"
         return context
+
+    def climate_exchange(self, values):
+        """Return a bounded thermal/moisture opportunity factor.
+
+        Real measurements drive the result. The site climate profile and solar
+        season only modulate how strongly moisture import/loss is penalized.
+        Forecasts may prefer a better near-term window, but never suppress the
+        hard IAQ start thresholds.
+        """
+        v = values
+        mode = v.get("seasonal_mode") or seasonal_mode(v.get("solar"))
+        ti = number(v.get("indoor_temperature"))
+        rh_i = number(v.get("indoor_humidity"))
+        intake_t = number(v.get("outdoor_temperature"))
+        weather_t = number(v.get("outdoor_temperature_weather"))
+        rh_o = number(v.get("outdoor_humidity"))
+        indoor_ah = absolute_humidity(ti, rh_i)
+        outdoor_ah = absolute_humidity(weather_t, rh_o)
+        factor = 1.0
+        humidity_strategy = "neutral"
+        temperature_strategy = "neutral"
+        forecast_strategy = "current_window"
+
+        # Direction-aware temperature opportunity. Absolute temperature-delta
+        # cost is already represented by the base thermal_factor.
+        if ti is not None and intake_t is not None:
+            if ti >= 26.5 and intake_t <= ti - 2:
+                factor *= 1.08
+                temperature_strategy = "cooling_help"
+            elif ti >= 26.5 and intake_t >= ti + 2:
+                factor *= 0.88
+                temperature_strategy = "adds_heat"
+            elif ti <= 19 and intake_t >= ti + 2:
+                factor *= 1.08
+                temperature_strategy = "warming_help"
+            elif ti <= 19 and intake_t <= ti - 2:
+                factor *= 0.82
+                temperature_strategy = "adds_cold"
+
+        # Direction-aware humidity exchange. Xi'an's monsoon profile increases
+        # the penalty for moisture import in the warm/autumn wet seasons and for
+        # moisture loss in the cold-dry season. It never changes IAQ hard floors.
+        ah_gap = None
+        if indoor_ah is not None and outdoor_ah is not None and rh_i is not None:
+            ah_gap = outdoor_ah - indoor_ah
+            wet_weight = 0.78 if mode in {"hot_humid", "autumn_humid"} else 0.86
+            dry_weight = 0.72 if mode == "cold_dry" else 0.84
+            if rh_i >= 60:
+                if ah_gap >= 1.5:
+                    factor *= wet_weight
+                    humidity_strategy = "avoid_moisture_import"
+                elif ah_gap <= -1.5:
+                    factor *= 1.08
+                    humidity_strategy = "drying_help"
+            elif rh_i <= 40:
+                if ah_gap <= -1.5:
+                    factor *= dry_weight
+                    humidity_strategy = "avoid_overdrying"
+                elif ah_gap >= 1.5:
+                    factor *= 1.08
+                    humidity_strategy = "humidifying_help"
+            elif abs(ah_gap) >= 5:
+                factor *= 0.90
+                humidity_strategy = "protect_comfort_band"
+
+        # Compare the current intake thermal/moisture burden with the 1/3/6 h
+        # forecast. Deferral is only a preferred-flow hint when IAQ is nonurgent.
+        forecast = v.get("forecast", {})
+        rows = forecast.get("hours", {}) if isinstance(forecast, dict) else {}
+        current_temp_delta = abs(ti - intake_t) if ti is not None and intake_t is not None else None
+        future_temp_deltas = []
+        future_moisture_burdens = []
+        current_moisture_burden = None
+        if indoor_ah is not None and outdoor_ah is not None and rh_i is not None:
+            if rh_i >= 60:
+                current_moisture_burden = max(0.0, outdoor_ah - indoor_ah)
+            elif rh_i <= 40:
+                current_moisture_burden = max(0.0, indoor_ah - outdoor_ah)
+            else:
+                current_moisture_burden = max(0.0, abs(outdoor_ah - indoor_ah) - 4)
+
+        for row in rows.values():
+            ft = number(row.get("temperature"))
+            frh = number(row.get("humidity"))
+            if ti is not None and ft is not None:
+                future_temp_deltas.append(abs(ti - ft))
+            fah = absolute_humidity(ft, frh)
+            if indoor_ah is not None and fah is not None and rh_i is not None:
+                if rh_i >= 60:
+                    future_moisture_burdens.append(max(0.0, fah - indoor_ah))
+                elif rh_i <= 40:
+                    future_moisture_burdens.append(max(0.0, indoor_ah - fah))
+                else:
+                    future_moisture_burdens.append(max(0.0, abs(fah - indoor_ah) - 4))
+
+        urgent = (number(v.get("co2")) or 0) >= 900 or (number(v.get("indoor_pm25")) or 0) > 26
+        temp_improvement = (
+            current_temp_delta - min(future_temp_deltas)
+            if current_temp_delta is not None and future_temp_deltas else 0
+        )
+        moisture_improvement = (
+            current_moisture_burden - min(future_moisture_burdens)
+            if current_moisture_burden is not None and future_moisture_burdens else 0
+        )
+        temp_worsening = (
+            min(future_temp_deltas) - current_temp_delta
+            if current_temp_delta is not None and future_temp_deltas else 0
+        )
+        moisture_worsening = (
+            min(future_moisture_burdens) - current_moisture_burden
+            if current_moisture_burden is not None and future_moisture_burdens else 0
+        )
+        if not urgent and (temp_improvement >= 4 or moisture_improvement >= 2):
+            factor *= 0.82
+            forecast_strategy = "wait_better_window"
+        elif not urgent and current_temp_delta is not None and current_temp_delta <= 5 and (
+            temp_worsening >= 4 or moisture_worsening >= 2
+        ):
+            factor *= 1.05
+            forecast_strategy = "use_current_window"
+
+        return {
+            "profile": self.climate_profile,
+            "seasonal_mode": mode,
+            "factor": round(clamp(factor, 0.55, 1.15), 3),
+            "indoor_ah": indoor_ah,
+            "outdoor_ah": outdoor_ah,
+            "ah_gap": ah_gap,
+            "humidity_strategy": humidity_strategy,
+            "temperature_strategy": temperature_strategy,
+            "forecast_strategy": forecast_strategy,
+            "current_temp_delta": current_temp_delta,
+        }
 
     def handle_fan_transition(self, previous, current, actor):
         now = self.clock()
@@ -152,7 +340,7 @@ class DynamicEngine(DecisionEngine):
         now = self.clock()
         manual = actor != "ha_automation"
         if manual:
-            self.manual.overrides[domain] = OverrideLease(domain, actor, now, now + timedelta(minutes=30), reason=f"manual_{domain}")
+            self.manual.overrides[domain] = OverrideLease(domain, actor, now, now + timedelta(minutes=15), reason=f"manual_{domain}")
         else:
             self.runtime["last_adjust_at"] = now.isoformat()
         return {"event": domain + "_change", "actor": actor, "previous": previous, "current": current, "manual_lease": manual}
@@ -181,15 +369,25 @@ class DynamicEngine(DecisionEngine):
         ti, to = v.get("indoor_temperature"), v.get("outdoor_temperature")
         if ti is not None and to is not None and abs(ti-to) >= 15:
             correction += 60
-        ai, ao = v.get("indoor_absolute_humidity"), v.get("outdoor_absolute_humidity")
-        if ai is not None and ao is not None:
-            correction += 15 if abs(ai-ao) > 5 else -15 if abs(ai-ao) < 2 else 0
-        # Forecast contributes only a bounded thermal correction, never starts fan.
-        for row in v.get("forecast", {}).get("hours", {}).values():
-            ft = number(row.get("temperature"))
-            if ft is not None and ti is not None and abs(ti-ft) >= 15:
-                correction += 15
-                break
+        climate = self.climate_exchange(v)
+        ai, ao = climate["indoor_ah"], climate["outdoor_ah"]
+        rh_i = number(v.get("indoor_humidity"))
+        gap = climate["ah_gap"]
+        if ai is not None and ao is not None and rh_i is not None and gap is not None:
+            if rh_i >= 60:
+                if gap >= 1.5:
+                    correction += 30 if climate["seasonal_mode"] in {"hot_humid", "autumn_humid"} else 20
+                elif gap <= -1.5:
+                    correction -= 15
+            elif rh_i <= 40:
+                if gap <= -1.5:
+                    correction += 30 if climate["seasonal_mode"] == "cold_dry" else 20
+                elif gap >= 1.5:
+                    correction -= 15
+        if climate["forecast_strategy"] == "wait_better_window":
+            correction += 15
+        elif climate["forecast_strategy"] == "use_current_window":
+            correction -= 10
         minutes += clamp(correction, -0.2*minutes, 0.2*minutes)
         if repeated:
             minutes = max(minutes, 240)
@@ -207,15 +405,53 @@ class DynamicEngine(DecisionEngine):
         ti, to = v.get("indoor_temperature"), v.get("outdoor_temperature")
         delta = abs(ti-to) if ti is not None and to is not None else None
         dust = (pm10 is not None and pm10 >= 150) or any(w in str(v.get("weather_condition")) for w in ("沙", "尘"))
-        # Energy-aware ventilation: when outdoor air is clean and there is no
-        # severe weather penalty, use the largest supported flow to shorten the
-        # fan duty cycle. This keeps the IAQ targets unchanged.
+        climate = self.climate_exchange(v)
+        result.climate_profile = climate["profile"]
+        result.seasonal_mode = climate["seasonal_mode"]
+        result.climate_exchange_factor = climate["factor"]
+        result.humidity_strategy = climate["humidity_strategy"]
+        result.temperature_strategy = climate["temperature_strategy"]
+        result.forecast_strategy = climate["forecast_strategy"]
+        result.indoor_absolute_humidity = round(climate["indoor_ah"], 3) if climate["indoor_ah"] is not None else None
+        result.outdoor_absolute_humidity = round(climate["outdoor_ah"], 3) if climate["outdoor_ah"] is not None else None
+
+        # Thermal/moisture opportunity only tunes preferred flow. It never
+        # suppresses the IAQ hard-start conditions below.
         outdoor_aqi = number(v.get("outdoor_aqi"))
-        clean_outdoor = outdoor_aqi is not None and outdoor_aqi <= 100 and pm10 is not None and pm10 < 150 and not dust
+        wind_speed = number(v.get("wind_speed"))
+        precipitation = number(v.get("precipitation"))
+        clean_outdoor = (
+            outdoor_aqi is not None and outdoor_aqi <= 100
+            and pmout is not None and pmout <= 35
+            and pm10 is not None and pm10 < 150
+            and not dust
+        )
         severe_weather = delta is not None and delta >= 15
-        high_flow_clean = clean_outdoor and not severe_weather and v.get("wind_speed") is not None and v.get("precipitation") in (0, None)
+        if climate["factor"] < 0.999:
+            result.flow = nearest_flow(max(60, result.flow * climate["factor"]))
+        elif climate["factor"] > 1 and clean_outdoor:
+            result.flow = nearest_flow(min(300, result.flow * climate["factor"]))
+
+        # Maximum-flow shortcut is now stricter than AQI alone: particulate air
+        # must actually be clean, wind must not be strong, and the current
+        # thermal/moisture window must not be forecast to improve materially.
+        high_flow_clean = (
+            clean_outdoor
+            and not severe_weather
+            and wind_speed is not None and wind_speed <= 30
+            and precipitation in (0, None)
+            and climate["factor"] >= 0.95
+            and climate["forecast_strategy"] != "wait_better_window"
+        )
         if high_flow_clean:
             result.flow = 300
+
+        # Re-apply the pollution cap after any climate adjustment.
+        pollution_index = outdoor_aqi if outdoor_aqi is not None else number(pmout)
+        cap = 300 if pollution_index is None or pollution_index <= 100 else 140 if pollution_index <= 150 else 100
+        if dust:
+            cap = 100
+        result.flow = min(result.flow, cap)
         # AQI still constrains flow, but does not authorize an earlier stop.
         # Only the existing dust / large-temperature-difference exceptions
         # may relax the IAQ floor until pollutant-specific rules are validated.
@@ -277,6 +513,9 @@ class DynamicEngine(DecisionEngine):
                 if actual is not None and abs(result.flow-actual) >= 40 and (not adjusted or now-adjusted >= timedelta(minutes=10)):
                     action = "air_normal"
         result.action = action
+        # Overall context quality may be degraded by optional inputs such as
+        # humidity/weather. Only critical IAQ/device inputs gate execution.
+        result.critical_input_quality = "degraded" if critical else "good"
         result.authority = "fault_guard" if critical else "emergency_co2" if self.runtime["emergency"] else "manual_off" if locked else "manual_run" if self.runtime["manual_session"] else "baseline_iaq"
         result.priority = 1 if critical else 2 if self.runtime["emergency"] else 3 if locked or self.runtime["manual_session"] else 6
         estimates = []
@@ -301,6 +540,39 @@ class DynamicEngine(DecisionEngine):
                          f"节气:{self.solar.get('current_term', '不可用')}；"
                          f"数据:{context.quality}" + ("（" + ",".join(context.stale) + "）" if context.stale else "") +
                          ("；室外沙尘限小风量" if dust else ""))
+        source = v.get("outdoor_temperature_source")
+        if source == "fresh_air_intake":
+            result.reason += f"；室外温度{v.get('outdoor_temperature')}℃来自新风机进风口"
+        elif source == "qweather":
+            result.reason += f"；室外温度{v.get('outdoor_temperature')}℃来自QWeather"
+        if ti is not None and v.get("indoor_humidity") is not None:
+            result.reason += f"；新风机旁室内{ti:.1f}℃/{float(v.get('indoor_humidity')):.0f}%RH"
+        if result.indoor_absolute_humidity is not None and result.outdoor_absolute_humidity is not None:
+            result.reason += (
+                f"；绝对湿度室内{result.indoor_absolute_humidity:.1f}/"
+                f"室外{result.outdoor_absolute_humidity:.1f}g/m³"
+            )
+        season_labels = {
+            "hot_humid": "夏季热湿",
+            "autumn_humid": "秋季湿润过渡",
+            "cold_dry": "冬季冷干",
+            "spring_transition": "春季过渡",
+            "unknown": "未知",
+        }
+        result.reason += (
+            f"；季节模型:{season_labels.get(result.seasonal_mode, result.seasonal_mode)}"
+            f"；热湿交换因子:{result.climate_exchange_factor}"
+        )
+        if result.humidity_strategy not in (None, "neutral"):
+            result.reason += f"；湿度策略:{result.humidity_strategy}"
+        if result.temperature_strategy not in (None, "neutral"):
+            result.reason += f"；温度策略:{result.temperature_strategy}"
+        if result.forecast_strategy not in (None, "current_window"):
+            result.reason += f"；预报策略:{result.forecast_strategy}"
+        if pmout is not None and pmout > 35:
+            result.reason += f"；室外PM2.5={pmout:g}，禁止300档清洁空气捷径"
+        if wind_speed is not None and wind_speed > 30:
+            result.reason += f"；室外风速{wind_speed:g}km/h，禁止300档捷径"
         if outdoor_aqi is not None and outdoor_aqi > 100:
             result.reason += f"；室外AQI={outdoor_aqi:g}，保留污染等级限流，AQI本身不放宽启停底线"
         if adverse_weather and target == 800:

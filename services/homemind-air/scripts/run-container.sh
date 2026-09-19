@@ -21,7 +21,8 @@ docker run -d \
   --cap-add SETGID \
   --cap-add KILL \
   -e TZ=Asia/Shanghai \
+  -e CLIMATE_PROFILE=xian_cold_monsoon \
   -e MQTT_USERNAME=homemind \
   -e MQTT_PASSWORD_FILE=/data/secrets/mqtt_password \
   -v "$HOMEMIND_DATA_DIR:/data" \
-  homemind-air:0.3.0
+  homemind-air:0.5.1

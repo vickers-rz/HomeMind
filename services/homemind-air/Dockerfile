@@ -13,10 +13,11 @@ COPY vendor/s6-overlay-noarch.tar.xz /tmp/s6-overlay-noarch.tar.xz
 COPY vendor/s6-overlay-x86_64.tar.xz /tmp/s6-overlay-x86_64.tar.xz
 COPY vendor/s6-overlay-aarch64.tar.xz /tmp/s6-overlay-aarch64.tar.xz
 RUN tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz \
-    && case "${TARGETARCH:-arm64}" in \
-         amd64) tar -C / -Jxpf /tmp/s6-overlay-x86_64.tar.xz ;; \
-         arm64) tar -C / -Jxpf /tmp/s6-overlay-aarch64.tar.xz ;; \
-         *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    && arch="${TARGETARCH:-$(apk --print-arch)}" \
+    && case "$arch" in \
+         amd64|x86_64) tar -C / -Jxpf /tmp/s6-overlay-x86_64.tar.xz ;; \
+         arm64|aarch64) tar -C / -Jxpf /tmp/s6-overlay-aarch64.tar.xz ;; \
+         *) echo "Unsupported target architecture: $arch" >&2; exit 1 ;; \
        esac \
     && rm /tmp/s6-overlay-*.tar.xz
 
