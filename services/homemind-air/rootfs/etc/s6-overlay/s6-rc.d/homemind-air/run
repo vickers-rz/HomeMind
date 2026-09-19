@@ -1,0 +1,9 @@
+#!/command/with-contenv sh
+if [ "$(id -u)" = "0" ]; then
+  exec /command/s6-setuidgid homemind "$0"
+fi
+while ! mosquitto_pub -h 127.0.0.1 -u "$MQTT_USERNAME" -P "$(cat "$MQTT_PASSWORD_FILE")" -t homemind/air/v1/internal/startup -m ready -q 1; do
+  sleep 1
+done
+cd /opt/homemind-air
+exec python -m app.main

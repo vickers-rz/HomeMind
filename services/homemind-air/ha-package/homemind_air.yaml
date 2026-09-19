@@ -1,0 +1,354 @@
+input_boolean:
+  homemind_air_approval_enabled:
+    name: HomeMind Air 审批功能（保留，默认停用）
+    initial: false
+  homemind_air_controller_enabled:
+    name: HomeMind Air 自动闭环
+    icon: mdi:shield-lock-outline
+    initial: true
+
+input_select:
+  homemind_air_control_level:
+    name: HomeMind Air 控制级别
+    icon: mdi:tune-variant
+    options:
+      - observe
+      - recommend
+      - bounded_auto
+    initial: bounded_auto
+
+  airfresh_control_source:
+    name: 新风机控制来源
+    options:
+      - idle
+      - automatic
+      - manual_under_500
+      - manual_under_700
+      - manual_normal
+    initial: idle
+    icon: mdi:fan-auto
+
+input_text:
+  homemind_air_last_request_id:
+    name: HomeMind Air 最近请求 ID
+    max: 64
+  homemind_air_last_notified_hash:
+    name: HomeMind Air 最近通知摘要
+    max: 64
+  airfresh_last_start_reason:
+    name: 新风机最近一次启动原因
+    max: 255
+  airfresh_last_start_at:
+    name: 新风机最近一次启动时间
+    max: 64
+  airfresh_last_setting_change:
+    name: 新风机最近一次档位变化
+    max: 255
+  airfresh_last_setting_change_at:
+    name: 新风机最近一次档位变化时间
+    max: 64
+
+timer:
+  airfresh_manual_minimum_run:
+    name: 新风机手动低 CO₂ 最短运行
+    duration: "00:10:00"
+    restore: true
+
+script:
+  homemind_air_apply_action:
+    alias: HomeMind Air：执行白名单动作
+    mode: queued
+    max: 5
+    fields:
+      action_name:
+        required: true
+      flow:
+        required: false
+    sequence:
+      # MQTT execution remains disabled. The two HA dynamic automations below are
+      # the sole automatic device-control path in bounded_auto mode.
+      - condition: template
+        value_template: "{{ false }}"
+      - choose:
+          - conditions: "{{ action_name == 'air_off' }}"
+            sequence:
+              - action: fan.turn_off
+                target:
+                  entity_id: fan.dmaker_t2017_ee71_air_fresh
+          - conditions: "{{ action_name in ['air_low', 'air_normal', 'air_fast'] }}"
+            sequence:
+              - action: fan.set_preset_mode
+                target:
+                  entity_id: fan.dmaker_t2017_ee71_air_fresh
+                data:
+                  preset_mode: Favorite
+              - action: select.select_option
+                target:
+                  entity_id: select.dmaker_t2017_ee71_fan_level
+                data:
+                  option: "{{ flow | string }}"
+              - action: fan.turn_on
+                target:
+                  entity_id: fan.dmaker_t2017_ee71_air_fresh
+
+automation:
+  - id: homemind_air_dynamic_start
+    alias: HomeMind Air：动态启动
+    description: 使用HomeMind计算的启动阈值；数据无效时不动作。
+    initial_state: true
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id:
+          - sensor.dmaker_t2017_ee71_co2_density
+          - sensor.dmaker_t2017_ee71_pm25_density
+          - sensor.homemind_air_start_co2
+          - sensor.homemind_air_start_pm25
+    conditions:
+      - condition: state
+        entity_id: input_boolean.homemind_air_controller_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_select.homemind_air_control_level
+        state: bounded_auto
+      - condition: state
+        entity_id: fan.dmaker_t2017_ee71_air_fresh
+        state: "off"
+      - condition: state
+        entity_id: sensor.homemind_air_input_quality
+        state: "good"
+      - condition: template
+        value_template: >-
+          {{ states('sensor.homemind_air_authority') in ['baseline_iaq', 'emergency_co2'] }}
+      - condition: template
+        value_template: >-
+          {{ is_number(states('sensor.homemind_air_start_co2')) and
+             is_number(states('sensor.homemind_air_start_pm25')) and
+             ((states('sensor.dmaker_t2017_ee71_co2_density') | float(0)) >=
+               (states('sensor.homemind_air_start_co2') | float(99999)) or
+             (states('sensor.dmaker_t2017_ee71_pm25_density') | float(0)) >
+               (states('sensor.homemind_air_start_pm25') | float(99999))) }}
+    actions:
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.airfresh_control_source
+        data:
+          option: automatic
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.airfresh_last_start_reason
+        data:
+          value: HomeMind Air 动态自动启动
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.airfresh_last_start_at
+        data:
+          value: "{{ now().isoformat() }}"
+      - action: fan.set_preset_mode
+        target: {entity_id: fan.dmaker_t2017_ee71_air_fresh}
+        data: {preset_mode: Favorite}
+      - action: select.select_option
+        target: {entity_id: select.dmaker_t2017_ee71_fan_level}
+        data: {option: "{{ states('sensor.homemind_air_recommended_flow') }}"}
+      - action: fan.turn_on
+        target: {entity_id: fan.dmaker_t2017_ee71_air_fresh}
+
+  - id: homemind_air_dynamic_stop
+    alias: HomeMind Air：动态停止
+    description: 同时低于HomeMind动态CO₂和PM2.5目标后停止。
+    initial_state: true
+    # HomeMind republishes target sensor attributes on each evaluation. A state
+    # trigger sees those attribute updates, so restart mode can reset the dwell
+    # delay indefinitely. Single mode lets the first valid dwell finish; all
+    # safety and target conditions are checked again immediately before stop.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id:
+          - sensor.dmaker_t2017_ee71_co2_density
+          - sensor.dmaker_t2017_ee71_pm25_density
+          - sensor.homemind_air_target_co2
+          - sensor.homemind_air_target_pm25
+    conditions:
+      - condition: state
+        entity_id: input_boolean.homemind_air_controller_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_select.homemind_air_control_level
+        state: bounded_auto
+      - condition: state
+        entity_id: fan.dmaker_t2017_ee71_air_fresh
+        state: "on"
+      - condition: state
+        entity_id: sensor.homemind_air_input_quality
+        state: "good"
+      - condition: template
+        value_template: >-
+          {{ as_timestamp(states('sensor.homemind_air_minimum_run_until'), 0) == 0 or
+             as_timestamp(now()) >= as_timestamp(states('sensor.homemind_air_minimum_run_until'), 0) }}
+      - condition: template
+        value_template: >-
+          {{ is_number(states('sensor.homemind_air_target_co2')) and
+             is_number(states('sensor.homemind_air_target_pm25')) and
+             (states('sensor.dmaker_t2017_ee71_co2_density') | float(99999)) <
+               (states('sensor.homemind_air_target_co2') | float(0)) and
+             (states('sensor.dmaker_t2017_ee71_pm25_density') | float(99999)) <
+               (states('sensor.homemind_air_target_pm25') | float(0)) }}
+    actions:
+      - delay: "00:02:00"
+      - condition: state
+        entity_id: input_boolean.homemind_air_controller_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_select.homemind_air_control_level
+        state: bounded_auto
+      - condition: state
+        entity_id: fan.dmaker_t2017_ee71_air_fresh
+        state: "on"
+      - condition: state
+        entity_id: sensor.homemind_air_input_quality
+        state: "good"
+      - condition: template
+        value_template: >-
+          {{ as_timestamp(states('sensor.homemind_air_minimum_run_until'), 0) == 0 or
+             as_timestamp(now()) >= as_timestamp(states('sensor.homemind_air_minimum_run_until'), 0) }}
+      - condition: template
+        value_template: >-
+          {{ (states('sensor.dmaker_t2017_ee71_co2_density') | float(99999)) < (states('sensor.homemind_air_target_co2') | float(0)) and
+             (states('sensor.dmaker_t2017_ee71_pm25_density') | float(99999)) < (states('sensor.homemind_air_target_pm25') | float(0)) }}
+      - action: fan.turn_off
+        target: {entity_id: fan.dmaker_t2017_ee71_air_fresh}
+
+  - id: homemind_air_mqtt_action_executor
+    alias: HomeMind Air：MQTT安全执行器
+    description: 保留的Policy Guard；当前正式自动控制由HA动态启动/停止自动化承担，本执行器固定禁用。
+    mode: queued
+    max: 10
+    triggers:
+      - trigger: mqtt
+        topic: homemind/air/v1/action/request
+    actions:
+      - variables:
+          request: "{{ trigger.payload_json }}"
+          request_id: "{{ trigger.payload_json.id | default('') }}"
+          action_name: "{{ trigger.payload_json.action | default('') }}"
+          flow: "{{ trigger.payload_json.flow | default(0) | int }}"
+          valid_schema: "{{ trigger.payload_json.schema_version | default(0) | int == 1 }}"
+          valid_action: "{{ action_name in ['air_off', 'air_low', 'air_normal', 'air_fast'] }}"
+          valid_flow: "{{ action_name == 'air_off' or flow in [60,80,100,120,140,160,180,200,220,240,260,280,300] }}"
+          not_duplicate: "{{ request_id != states('input_text.homemind_air_last_request_id') }}"
+          not_expired: >-
+            {{ as_datetime(trigger.payload_json.expires_at | default('1970-01-01T00:00:00+00:00')) > now() }}
+          fresh_inputs: >-
+            {{ (as_timestamp(now()) - as_timestamp(states.sensor.dmaker_t2017_ee71_co2_density.last_updated)) < 600
+               and (as_timestamp(now()) - as_timestamp(states.sensor.dmaker_t2017_ee71_pm25_density.last_updated)) < 600
+               and is_number(states('sensor.dmaker_t2017_ee71_co2_density'))
+               and is_number(states('sensor.dmaker_t2017_ee71_pm25_density')) }}
+          execution_allowed: >-
+            {{ false }}
+          accepted: >-
+            {{ valid_schema and valid_action and valid_flow and not_duplicate and
+               not_expired and fresh_inputs and execution_allowed }}
+          reject_reason: >-
+            {% if not valid_schema %}invalid_schema
+            {% elif not valid_action %}unknown_action
+            {% elif not valid_flow %}invalid_flow
+            {% elif not not_duplicate %}duplicate
+            {% elif not not_expired %}expired
+            {% elif not fresh_inputs %}stale_input
+            {% elif not execution_allowed %}controller_disabled
+            {% else %}accepted{% endif %}
+      - choose:
+          - conditions: "{{ accepted }}"
+            sequence:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.homemind_air_last_request_id
+                data:
+                  value: "{{ request_id }}"
+              - action: script.homemind_air_apply_action
+                data:
+                  action_name: "{{ action_name }}"
+                  flow: "{{ flow }}"
+              - delay: "00:00:03"
+              - action: mqtt.publish
+                data:
+                  topic: homemind/air/v1/action/result
+                  qos: 1
+                  payload: >-
+                    {{ dict(request_id=request_id, status='executed', executed_at=now().isoformat(),
+                       actual_fan_state=states('fan.dmaker_t2017_ee71_air_fresh'),
+                       actual_flow=states('select.dmaker_t2017_ee71_fan_level') | int(0),
+                       guard_reason='accepted') | to_json }}
+        default:
+          - action: mqtt.publish
+            data:
+              topic: homemind/air/v1/action/result
+              qos: 1
+              payload: >-
+                {{ dict(request_id=request_id, status='rejected', executed_at=now().isoformat(),
+                   actual_fan_state=states('fan.dmaker_t2017_ee71_air_fresh'),
+                   actual_flow=states('select.dmaker_t2017_ee71_fan_level') | int(0),
+                   guard_reason=reject_reason) | to_json }}
+
+  - id: homemind_air_recommendation_notification
+    alias: HomeMind Air：建议通知
+    initial_state: false
+    mode: queued
+    max: 5
+    triggers:
+      - trigger: mqtt
+        topic: homemind/air/v1/recommendation
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ is_state('input_boolean.homemind_air_approval_enabled', 'on')
+             and is_state('input_select.homemind_air_control_level', 'recommend')
+             and trigger.payload_json.action | default('no_action') != 'no_action'
+             and trigger.payload_json.context_hash | default('') != states('input_text.homemind_air_last_notified_hash') }}
+    actions:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.homemind_air_last_notified_hash
+        data:
+          value: "{{ trigger.payload_json.context_hash }}"
+      - action: notify.mobile_app_iphone
+        data:
+          title: HomeMind Air 建议
+          message: >-
+            {{ trigger.payload_json.reason }}；建议风量 {{ trigger.payload_json.flow }} m³/h，
+            建议 {{ trigger.payload_json.duration_minutes }} 分钟。
+          data:
+            tag: homemind-air-recommendation
+            actions:
+              - action: HOMEMIND_ACCEPT
+                title: 接受
+              - action: HOMEMIND_REJECT
+                title: 忽略
+              - action: HOMEMIND_30M
+                title: 改为30分钟
+
+  - id: homemind_air_mobile_feedback
+    alias: HomeMind Air：记录iPhone审批反馈
+    initial_state: false
+    mode: queued
+    triggers:
+      - trigger: event
+        event_type: mobile_app_notification_action
+    conditions:
+      - condition: state
+        entity_id: input_boolean.homemind_air_approval_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_select.homemind_air_control_level
+        state: "recommend"
+      - condition: template
+        value_template: "{{ trigger.event.data.action | default('') in ['HOMEMIND_ACCEPT','HOMEMIND_REJECT','HOMEMIND_30M','HOMEMIND_2H','HOMEMIND_8H','HOMEMIND_KEEP_OFF','HOMEMIND_UNDO'] }}"
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: homemind/air/v1/feedback
+          qos: 1
+          payload: >-
+            {{ dict(action=trigger.event.data.action,
+               received_at=now().isoformat(), source='notify.mobile_app_iphone') | to_json }}

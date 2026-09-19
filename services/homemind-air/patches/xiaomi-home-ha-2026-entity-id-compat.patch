@@ -1,0 +1,277 @@
+diff --git a/custom_components/xiaomi_home/__init__.py b/custom_components/xiaomi_home/__init__.py
+index b26cf0a6..d9970a09 100644
+--- a/custom_components/xiaomi_home/__init__.py
++++ b/custom_components/xiaomi_home/__init__.py
+@@ -79,6 +79,70 @@ async def async_setup(hass: HomeAssistant, hass_config: dict) -> bool:
+     hass.data[DOMAIN].setdefault('entities', {})
+     for platform in SUPPORTED_PLATFORMS:
+         hass.data[DOMAIN]['entities'][platform] = []
++    # An unofficial migration patch bumped the config entry version. Home
++    # Assistant refuses to load an entry whose version is newer than the one
++    # declared by the config flow, so reset it, the unique_id is migrated when
++    # the entry is set up instead. This runs before the entry is loaded, hence
++    # before its version is checked.
++    for config_entry in hass.config_entries.async_entries(DOMAIN):
++        if config_entry.version <= 1:
++            continue
++        _LOGGER.warning(
++            'reset the config entry version set by an unofficial patch, '
++            '%s -> 1, the unique_id of the entities is migrated '
++            'automatically, %s',
++            config_entry.version, config_entry.entry_id)
++        hass.config_entries.async_update_entry(config_entry, version=1)
++    return True
++
++
++def migrate_service_unique_id(
++    er: entity_registry.EntityRegistry,
++    er_entries: dict[str, entity_registry.RegistryEntry],
++    device: MIoTDevice, spec: MIoTSpecService
++) -> bool:
++    """Migrate the unique_id of a service entity registered by a previous
++    version of the integration.
++
++    Only the unique_id is rewritten, the entity_id is left untouched so that
++    the automations, scripts and dashboards referring to it keep working.
++
++    Return False when a legacy entity was found but could not be migrated.
++    """
++    unique_id = device.gen_service_entity_id(
++        ha_domain=DOMAIN, siid=spec.iid, description=spec.description)
++    if unique_id in er_entries:
++        # Already up to date. A legacy entity left over from the format change
++        # may still be registered, it is not removed here since that would
++        # also drop the name, area and aliases set by the user.
++        return True
++    legacy_unique_id: Optional[str] = next(
++        (legacy_unique_id
++         for legacy_unique_id in (
++             device.gen_service_entity_id_unofficial(
++                 ha_domain=DOMAIN, siid=spec.iid,
++                 description=spec.description)
++             + device.gen_service_entity_id_legacy(
++                 ha_domain=DOMAIN, siid=spec.iid))
++         if legacy_unique_id in er_entries),
++        None)
++    if not legacy_unique_id:
++        # A newly added entity
++        return True
++    entity_id = er_entries[legacy_unique_id].entity_id
++    try:
++        er.async_update_entity(entity_id, new_unique_id=unique_id)
++    except ValueError as error:
++        # The unique_id is registered by another config entry, which happens
++        # when the same device is shared between two Xiaomi accounts
++        _LOGGER.warning(
++            'migrate unique_id failed, %s, %s, %s',
++            error, entity_id, unique_id)
++        return False
++    er_entries[unique_id] = er_entries.pop(legacy_unique_id)
++    _LOGGER.info(
++        'migrate unique_id, %s, %s -> %s',
++        entity_id, legacy_unique_id, unique_id)
+     return True
+ 
+ 
+@@ -125,6 +189,13 @@ def ha_persistent_notify(
+         await manufacturer.init_async()
+         miot_devices: list[MIoTDevice] = []
+         er = entity_registry.async_get(hass=hass)
++        # Index the registered entities by unique_id, used to migrate the
++        # entities registered by a previous version of the integration
++        er_entries: dict[str, entity_registry.RegistryEntry] = {
++            entry.unique_id: entry
++            for entry in entity_registry.async_entries_for_config_entry(
++                registry=er, config_entry_id=entry_id)}
++        migrate_failed: int = 0
+         for did, info in miot_client.device_list.items():
+             spec_instance = await spec_parser.parse(urn=info['urn'])
+             if not isinstance(spec_instance, MIoTSpecInstance):
+@@ -138,6 +209,16 @@ def ha_persistent_notify(
+                 spec_instance=spec_instance)
+             miot_devices.append(device)
+             device.spec_transform()
++            # Migrate the unique_id of the entities registered by a previous
++            # version of the integration
++            for entities in device.entity_list.values():
++                for entity in entities:
++                    if not isinstance(entity.spec, MIoTSpecService):
++                        continue
++                    if not migrate_service_unique_id(
++                            er=er, er_entries=er_entries, device=device,
++                            spec=entity.spec):
++                        migrate_failed += 1
+             # Remove filter entities and non-standard entities
+             for platform in SUPPORTED_PLATFORMS:
+                 # ONLY support filter spec service translate entity
+@@ -234,6 +315,12 @@ def ha_persistent_notify(
+                     if er.async_get(entity_id_or_uuid=entity_id):
+                         er.async_remove(entity_id=entity_id)
+ 
++        if migrate_failed:
++            _LOGGER.warning(
++                'unique_id migration skipped, %s entities may show up as new '
++                'entities while the old ones become unavailable',
++                migrate_failed)
++
+         hass.data[DOMAIN]['devices'][config_entry.entry_id] = miot_devices
+         await hass.config_entries.async_forward_entry_setups(
+             config_entry, SUPPORTED_PLATFORMS)
+diff --git a/custom_components/xiaomi_home/miot/miot_device.py b/custom_components/xiaomi_home/miot/miot_device.py
+index 8ed6fca3..d64a47a7 100644
+--- a/custom_components/xiaomi_home/miot/miot_device.py
++++ b/custom_components/xiaomi_home/miot/miot_device.py
+@@ -108,6 +108,32 @@
+ _LOGGER = logging.getLogger(__name__)
+ 
+ 
++def ha_entity_domain(entity: Entity) -> str:
++    """Return the Home Assistant platform domain of an entity.
++
++    Every entity mixes in a Home Assistant entity base class, e.g.
++    Light(MIoTServiceEntity, LightEntity), which is declared in
++    homeassistant.components.<domain>. Fall back to the integration domain
++    when no such base class is found.
++    """
++    for cls in type(entity).__mro__:
++        module = cls.__module__ or ''
++        if module.startswith('homeassistant.components.'):
++            return module.split('.')[2]
++    return DOMAIN
++
++
++def to_valid_entity_id(entity_id: str) -> str:
++    """Return a valid entity_id.
++
++    The object_id is built from the MIoT-Spec-V2 instance, which may contain
++    characters that are not allowed in an entity_id, e.g. a description in
++    Chinese or a trailing separator.
++    """
++    domain, _, object_id = entity_id.partition('.')
++    return f'{domain}.{slugify_name(object_id)}'
++
++
+ class MIoTEntityData:
+     """MIoT Entity Data."""
+     platform: str
+@@ -354,6 +380,34 @@ def gen_service_entity_id(self, ha_domain: str, siid: int,
+             f'{ha_domain}.{self._model_strs[0][:9]}_{self.did_tag}_'
+             f'{self._model_strs[-1][:20]}_s_{siid}_{description}')
+ 
++    def gen_service_entity_id_unofficial(
++        self, ha_domain: str, siid: int, description: str
++    ) -> list[str]:
++        """Return the service entity ids generated by an unofficial patch.
++
++        The patch slugified the description, and an earlier revision of it
++        left a trailing separator behind when the description was empty once
++        slugified.
++        """
++        entity_id = (
++            f'{ha_domain}.{self._model_strs[0][:9]}_{self.did_tag}_'
++            f'{self._model_strs[-1][:20]}_s_{siid}')
++        return [
++            f'{entity_id}_{slugify_name(description)}',
++            f'{entity_id}_']
++
++    def gen_service_entity_id_legacy(
++        self, ha_domain: str, siid: int
++    ) -> list[str]:
++        """Return the service entity ids generated by previous versions.
++
++        The description of the service was appended to the id, an entity
++        registered before that change is still stored under the id without it.
++        """
++        return [
++            f'{ha_domain}.{self._model_strs[0][:9]}_{self.did_tag}_'
++            f'{self._model_strs[-1][:20]}_s_{siid}']
++
+     def gen_prop_entity_id(
+         self, ha_domain: str, spec_name: str, siid: int, piid: int
+     ) -> str:
+@@ -933,19 +987,28 @@ def __init__(
+         self._state_sub_id = 0
+         self._value_sub_ids = {}
+         # Gen entity id
++        # The unique_id keeps the integration domain so that it stays the same
++        # for the entities that are already registered, the entity_id uses the
++        # Home Assistant platform domain and must be a valid entity_id.
++        ha_domain = ha_entity_domain(self)
+         if isinstance(self.entity_data.spec, MIoTSpecInstance):
+-            self.entity_id = miot_device.gen_device_entity_id(DOMAIN)
++            self._attr_unique_id = miot_device.gen_device_entity_id(DOMAIN)
++            self.entity_id = to_valid_entity_id(
++                miot_device.gen_device_entity_id(ha_domain))
+             self._attr_name = f' {self.entity_data.spec.description_trans}'
+         elif isinstance(self.entity_data.spec, MIoTSpecService):
+-            self.entity_id = miot_device.gen_service_entity_id(
++            self._attr_unique_id = miot_device.gen_service_entity_id(
+                 DOMAIN, siid=self.entity_data.spec.iid,
+                 description=self.entity_data.spec.description)
++            self.entity_id = to_valid_entity_id(
++                miot_device.gen_service_entity_id(
++                    ha_domain, siid=self.entity_data.spec.iid,
++                    description=self.entity_data.spec.description))
+             self._attr_name = (
+                 f'{"* "if self.entity_data.spec.proprietary else " "}'
+                 f'{self.entity_data.spec.description_trans}')
+             self._attr_entity_category = entity_data.spec.entity_category
+         # Set entity attr
+-        self._attr_unique_id = self.entity_id
+         self._attr_should_poll = False
+         self._attr_has_entity_name = True
+         self._attr_available = miot_device.online
+@@ -1240,11 +1303,15 @@ def __init__(self, miot_device: MIoTDevice, spec: MIoTSpecProperty) -> None:
+         self._value_sub_id = 0
+         self._pending_write_ha_state_timer = None
+         # Gen entity_id
+-        self.entity_id = self.miot_device.gen_prop_entity_id(
++        # The unique_id keeps the integration domain, see MIoTServiceEntity
++        self._attr_unique_id = self.miot_device.gen_prop_entity_id(
+             ha_domain=DOMAIN, spec_name=spec.name,
+             siid=spec.service.iid, piid=spec.iid)
++        self.entity_id = to_valid_entity_id(
++            self.miot_device.gen_prop_entity_id(
++                ha_domain=ha_entity_domain(self), spec_name=spec.name,
++                siid=spec.service.iid, piid=spec.iid))
+         # Set entity attr
+-        self._attr_unique_id = self.entity_id
+         self._attr_should_poll = False
+         self._attr_has_entity_name = True
+         self._attr_name = (
+@@ -1382,11 +1449,15 @@ def __init__(self, miot_device: MIoTDevice, spec: MIoTSpecEvent) -> None:
+         self.service = spec.service
+         self._main_loop = miot_device.miot_client.main_loop
+         # Gen entity_id
+-        self.entity_id = self.miot_device.gen_event_entity_id(
++        # The unique_id keeps the integration domain, see MIoTServiceEntity
++        self._attr_unique_id = self.miot_device.gen_event_entity_id(
+             ha_domain=DOMAIN, spec_name=spec.name,
+             siid=spec.service.iid,  eiid=spec.iid)
++        self.entity_id = to_valid_entity_id(
++            self.miot_device.gen_event_entity_id(
++                ha_domain=ha_entity_domain(self), spec_name=spec.name,
++                siid=spec.service.iid,  eiid=spec.iid))
+         # Set entity attr
+-        self._attr_unique_id = self.entity_id
+         self._attr_should_poll = False
+         self._attr_has_entity_name = True
+         self._attr_name = (
+@@ -1493,11 +1564,15 @@ def __init__(self, miot_device: MIoTDevice, spec: MIoTSpecAction) -> None:
+         self._main_loop = miot_device.miot_client.main_loop
+         self._state_sub_id = 0
+         # Gen entity_id
+-        self.entity_id = self.miot_device.gen_action_entity_id(
++        # The unique_id keeps the integration domain, see MIoTServiceEntity
++        self._attr_unique_id = self.miot_device.gen_action_entity_id(
+             ha_domain=DOMAIN, spec_name=spec.name,
+             siid=spec.service.iid, aiid=spec.iid)
++        self.entity_id = to_valid_entity_id(
++            self.miot_device.gen_action_entity_id(
++                ha_domain=ha_entity_domain(self), spec_name=spec.name,
++                siid=spec.service.iid, aiid=spec.iid))
+         # Set entity attr
+-        self._attr_unique_id = self.entity_id
+         self._attr_should_poll = False
+         self._attr_has_entity_name = True
+         self._attr_name = (
