@@ -88,6 +88,8 @@ VOC Index is a trend signal, not a universal “odor meter”. Human feedback re
 
 #### Visual perception
 
+The [C700 Video subproject](../subprojects/c700-video/README.md) provides the Xiaomi camera stream adapter, SD timeline index and guarded recording retention. Its [architecture](../subprojects/c700-video/ARCHITECTURE.md) separates implemented transport/storage capabilities from the planned Frigate/VLM semantic event integration.
+
 ```text
 Camera
   ↓

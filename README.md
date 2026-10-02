@@ -113,13 +113,21 @@ Sensors / Cameras / Weather / Presence
      Whitelisted HA Scripts
 ```
 
+## 子项目
+
+### [C700 Video：摄像头与视频证据](subprojects/c700-video/README.md)
+
+HomeMind 的独立摄像头子项目，覆盖小米 C700 LAN/云中继接入、RTSP/WebRTC 输出、SD 时间线索引与受保护的夜间录像保留。完整概览、架构和 AIoT 面试说明直接收录在本仓库；[实现源码](https://github.com/vickers-rz/go2rtc-c700-cloud-relay)独立维护于公开仓库。
+
+已实现的是视频基础设施与元数据保留链路；Frigate/VLM 视觉语义到 HomeMind 推荐的闭环仍待集成验收。
+
 ## 推荐组件
 
 | 层 | 组件 | 职责 |
 |---|---|---|
 | IoT / 状态总线 | Home Assistant | 设备接入、状态、Recorder、Automation、Script、Scene |
 | MCU / 空气传感器 | ESPHome + ESP32 | PM/VOC/NOx/CO₂/温湿度采集 |
-| 视频接入 | go2rtc | RTSP/WebRTC 视频流中转 |
+| 视频接入 | [C700 Video 子项目](subprojects/c700-video/README.md) / go2rtc | C700 接入、RTSP/WebRTC、SD 时间线与录像保留 |
 | 事件视觉 | Frigate | 目标检测、Zone、事件触发、录像 |
 | 视觉语义 | Frigate GenAI / HA AI Task | 垃圾车、卸料、压缩、关门等场景理解 |
 | 本地模型 | Ollama | 本地 VLM/LLM，例如 Qwen3-VL 等 |
