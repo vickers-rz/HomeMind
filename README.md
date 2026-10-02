@@ -117,7 +117,7 @@ Sensors / Cameras / Weather / Presence
 
 ### [C700 Video：摄像头与视频证据](subprojects/c700-video/README.md)
 
-HomeMind 的独立摄像头子项目，覆盖小米 C700 LAN/云中继接入、RTSP/WebRTC 输出、SD 时间线索引与受保护的夜间录像保留。完整概览、架构和 技术说明直接收录在本仓库；[实现源码](https://github.com/vickers-rz/go2rtc-c700-cloud-relay)独立维护于公开仓库。
+HomeMind 的独立摄像头子项目，覆盖小米 C700 LAN/云中继接入、RTSP/WebRTC 输出、SD 时间线索引与受保护的夜间录像保留。项目概览、架构与技术文档直接收录在本仓库；[实现源码](https://github.com/vickers-rz/go2rtc-c700-cloud-relay)独立维护于公开仓库。
 
 已实现的是视频基础设施与元数据保留链路；Frigate/VLM 视觉语义到 HomeMind 推荐的闭环仍待集成验收。
 
