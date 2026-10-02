@@ -32,7 +32,7 @@
 ## 阅读顺序
 
 1. [架构、数据契约与故障边界](ARCHITECTURE.md)
-2. [技术说明与演示清单](INTERVIEW.md)
+2. [技术说明与演示清单](TECHNICAL_GUIDE.md)
 3. [源码与运行文档](https://github.com/vickers-rz/go2rtc-c700-cloud-relay)（公开）
 
 ## 仓库关系
